@@ -1,0 +1,369 @@
+part of 'server_boot.dart';
+
+final Map<int, Set<NativeHttpServer>> _nativeSharedServersByPort =
+    <int, Set<NativeHttpServer>>{};
+
+/// {@template server_native_http_server_example}
+/// Example:
+/// ```dart
+/// final server = await NativeHttpServer.bind(InternetAddress.loopbackIPv4, 8080);
+/// await for (final request in server) {
+///   request.response
+///     ..statusCode = HttpStatus.ok
+///     ..headers.contentType = ContentType.text
+///     ..write('hello from server_native')
+///     ..close();
+/// }
+/// ```
+/// {@endtemplate}
+
+/// `dart:io`-style HTTP server powered by the server_native transport.
+///
+/// This class implements [HttpServer] so existing `HttpServer` request handling
+/// patterns can be reused with the Rust front transport.
+///
+/// {@macro server_native_http_server_example}
+final class NativeHttpServer extends StreamView<HttpRequest>
+    implements HttpServer {
+  NativeHttpServer._(this._requestController, this._connectionCounters)
+    : defaultResponseHeaders = _createNativeHttpDefaultResponseHeaders(),
+      super(_requestController.stream);
+
+  /// Binds a server similarly to [HttpServer.bind], including support for
+  /// `"localhost"` and `"any"` convenience addresses.
+  ///
+  /// [nativeCallback] defaults to `true` and routes `HttpRequest` handling
+  /// through the native callback transport (bridge socket bypassed).
+  /// Set [nativeCallback] to `false` to use bridge socket transport.
+  static Future<NativeHttpServer> bind(
+    Object address,
+    int port, {
+    int backlog = 0,
+    bool v6Only = false,
+    bool shared = false,
+    bool http2 = false,
+    bool http3 = true,
+    bool nativeCallback = true,
+    Future<void>? shutdownSignal,
+  }) => _nativeHttpServerBind(
+    address,
+    port,
+    backlog: backlog,
+    v6Only: v6Only,
+    shared: shared,
+    http2: http2,
+    http3: http3,
+    nativeCallback: nativeCallback,
+    shutdownSignal: shutdownSignal,
+  );
+
+  /// Binds on all loopback interfaces available on the host.
+  ///
+  /// [nativeCallback] defaults to `true` and routes `HttpRequest` handling
+  /// through the native callback transport (bridge socket bypassed).
+  /// Set [nativeCallback] to `false` to use bridge socket transport.
+  static Future<NativeHttpServer> loopback(
+    int port, {
+    int backlog = 0,
+    bool v6Only = false,
+    bool shared = false,
+    bool http2 = false,
+    bool http3 = true,
+    bool nativeCallback = true,
+    Future<void>? shutdownSignal,
+  }) => _nativeHttpServerLoopback(
+    port,
+    backlog: backlog,
+    v6Only: v6Only,
+    shared: shared,
+    http2: http2,
+    http3: http3,
+    nativeCallback: nativeCallback,
+    shutdownSignal: shutdownSignal,
+  );
+
+  /// Binds a TLS server similarly to [HttpServer.bindSecure].
+  ///
+  /// [nativeCallback] defaults to `true` and routes `HttpRequest` handling
+  /// through the native callback transport (bridge socket bypassed).
+  /// Set [nativeCallback] to `false` to use bridge socket transport.
+  static Future<NativeHttpServer> bindSecure(
+    Object address,
+    int port, {
+    required String certificatePath,
+    required String keyPath,
+    String? certificatePassword,
+    int backlog = 0,
+    bool v6Only = false,
+    bool requestClientCertificate = false,
+    bool shared = false,
+    bool http2 = false,
+    bool http3 = true,
+    bool nativeCallback = true,
+    Future<void>? shutdownSignal,
+  }) => _nativeHttpServerBindSecure(
+    address,
+    port,
+    certificatePath: certificatePath,
+    keyPath: keyPath,
+    certificatePassword: certificatePassword,
+    backlog: backlog,
+    v6Only: v6Only,
+    requestClientCertificate: requestClientCertificate,
+    shared: shared,
+    http2: http2,
+    http3: http3,
+    nativeCallback: nativeCallback,
+    shutdownSignal: shutdownSignal,
+  );
+
+  /// Binds a TLS server on all loopback interfaces available on the host.
+  ///
+  /// [nativeCallback] defaults to `true` and routes `HttpRequest` handling
+  /// through the native callback transport (bridge socket bypassed).
+  /// Set [nativeCallback] to `false` to use bridge socket transport.
+  static Future<NativeHttpServer> loopbackSecure(
+    int port, {
+    required String certificatePath,
+    required String keyPath,
+    String? certificatePassword,
+    int backlog = 0,
+    bool v6Only = false,
+    bool requestClientCertificate = false,
+    bool shared = false,
+    bool http2 = false,
+    bool http3 = true,
+    bool nativeCallback = true,
+    Future<void>? shutdownSignal,
+  }) => _nativeHttpServerLoopbackSecure(
+    port,
+    certificatePath: certificatePath,
+    keyPath: keyPath,
+    certificatePassword: certificatePassword,
+    backlog: backlog,
+    v6Only: v6Only,
+    requestClientCertificate: requestClientCertificate,
+    shared: shared,
+    http2: http2,
+    http3: http3,
+    nativeCallback: nativeCallback,
+    shutdownSignal: shutdownSignal,
+  );
+
+  final StreamController<HttpRequest> _requestController;
+  final _ProxyConnectionCounters _connectionCounters;
+  final List<_NativeHttpBinding> _bindings = <_NativeHttpBinding>[];
+  final Set<int> _sharedPorts = <int>{};
+  final Completer<void> _stopped = Completer<void>();
+  final _NativeSessionStore _sessions = _NativeSessionStore(
+    timeout: const Duration(minutes: 20),
+  );
+  int _sessionTimeoutSeconds = 20 * 60;
+  int _runningBindingCount = 0;
+  bool _closed = false;
+  bool _forceClosing = false;
+
+  Future<void> _waitForActiveRequestsToDrain({
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    // Give requests that are already in-flight at close() call-time a chance
+    // to be observed by counters before concluding the server is drained.
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+    final deadline = DateTime.now().add(timeout);
+    var stableZeroSamples = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      final info = _connectionCounters.snapshot();
+      if (info.active == 0) {
+        stableZeroSamples++;
+        if (stableZeroSamples >= 3) {
+          return;
+        }
+      } else {
+        stableZeroSamples = 0;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
+
+  Future<void> _handleRequest(BridgeHttpRequest request) {
+    if ((_closed && !_forceClosing) || _requestController.isClosed) {
+      request.response.statusCode = HttpStatus.serviceUnavailable;
+      return request.response.close();
+    }
+    if (!_requestController.hasListener) {
+      return _tryForwardSharedRequest(request).then((forwarded) {
+        if (forwarded) {
+          return request.response.done;
+        }
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        return request.response.close();
+      });
+    }
+    _applyNativeHttpRequestPolicies(
+      request: request,
+      sessions: _sessions,
+      sessionTimeoutSeconds: _sessionTimeoutSeconds,
+      autoCompress: autoCompress,
+      defaultResponseHeaders: defaultResponseHeaders,
+      serverHeader: serverHeader,
+    );
+    final response = request.response;
+    runZonedGuarded(
+      () {
+        _requestController.add(request);
+      },
+      (error, stackTrace) {
+        _nativeVerboseLog(
+          '[server_native] uncaught request listener error: $error\n$stackTrace',
+        );
+        try {
+          response
+            ..statusCode = HttpStatus.internalServerError
+            ..headers.contentType = ContentType.text
+            ..write('Internal Server Error');
+          // ignore: discarded_futures
+          response.close();
+        } catch (_) {
+          // Response may already be closed or detached.
+        }
+      },
+    );
+    return response.done;
+  }
+
+  bool get _canAcceptRequests =>
+      !_closed &&
+      !_requestController.isClosed &&
+      _requestController.hasListener;
+
+  void _registerSharedPort(int port) {
+    final peers = _nativeSharedServersByPort.putIfAbsent(
+      port,
+      () => <NativeHttpServer>{},
+    );
+    peers.add(this);
+    _sharedPorts.add(port);
+  }
+
+  void _unregisterSharedPorts() {
+    for (final port in _sharedPorts) {
+      final peers = _nativeSharedServersByPort[port];
+      if (peers == null) {
+        continue;
+      }
+      peers.remove(this);
+      if (peers.isEmpty) {
+        _nativeSharedServersByPort.remove(port);
+      }
+    }
+    _sharedPorts.clear();
+  }
+
+  Future<bool> _tryForwardSharedRequest(BridgeHttpRequest request) async {
+    final localPort = request.connectionInfo?.localPort;
+    if (localPort == null) {
+      return false;
+    }
+    final peers = _nativeSharedServersByPort[localPort];
+    if (peers == null || peers.isEmpty) {
+      return false;
+    }
+    for (final peer in peers) {
+      if (identical(peer, this) || !peer._canAcceptRequests) {
+        continue;
+      }
+      await peer._handleRequest(request);
+      return true;
+    }
+    return false;
+  }
+
+  void _completeIfStopped() {
+    if (_stopped.isCompleted) {
+      return;
+    }
+    if (_runningBindingCount > 0) {
+      _runningBindingCount--;
+    }
+    if (_runningBindingCount != 0) {
+      return;
+    }
+    _requestController.close();
+    _stopped.complete();
+  }
+
+  @override
+  String? serverHeader;
+
+  @override
+  final HttpHeaders defaultResponseHeaders;
+
+  @override
+  bool autoCompress = false;
+
+  @override
+  Duration? idleTimeout = const Duration(seconds: 120);
+
+  @override
+  int get port {
+    if (_bindings.isEmpty) {
+      return 0;
+    }
+    return _bindings.first.running.port;
+  }
+
+  @override
+  InternetAddress get address {
+    if (_bindings.isEmpty) {
+      return InternetAddress.loopbackIPv4;
+    }
+    return _bindings.first.address;
+  }
+
+  @override
+  set sessionTimeout(int timeout) {
+    if (timeout < 0) {
+      throw ArgumentError.value(
+        timeout,
+        'timeout',
+        'sessionTimeout must be >= 0',
+      );
+    }
+    _sessionTimeoutSeconds = timeout;
+    _sessions.setTimeout(Duration(seconds: timeout));
+  }
+
+  @override
+  HttpConnectionsInfo connectionsInfo() => _connectionCounters.snapshot();
+
+  @override
+  Future close({bool force = false}) async {
+    if (_closed) {
+      return _stopped.future;
+    }
+    _forceClosing = force;
+    _closed = true;
+    _unregisterSharedPorts();
+    if (!force) {
+      await _waitForActiveRequestsToDrain();
+    }
+    await Future.wait(
+      _bindings.map((binding) => binding.running.close(force: true)),
+      eagerError: false,
+    );
+    await Future.wait(
+      _bindings.map((binding) => binding.running.done),
+      eagerError: false,
+    );
+    if (!_requestController.isClosed) {
+      await _requestController.close();
+    }
+    if (!_stopped.isCompleted) {
+      _stopped.complete();
+    }
+    _forceClosing = false;
+    _connectionCounters.reset();
+    _sessions.dispose();
+    return _stopped.future;
+  }
+}

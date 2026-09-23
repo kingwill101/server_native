@@ -1,0 +1,365 @@
+part of 'bridge_runtime.dart';
+
+/// Streaming `HttpResponse` adapter for chunked bridge responses.
+final class BridgeStreamingHttpResponse implements HttpResponse {
+  BridgeStreamingHttpResponse({
+    required this.onStart,
+    required this.onChunk,
+    required String requestMethod,
+    required BridgeConnectionInfo connectionInfo,
+    void Function(BridgeDetachedSocket detachedSocket)? onDetachedSocket,
+  }) : _connectionInfo = connectionInfo,
+       _onDetachedSocket = onDetachedSocket,
+       _isHeadRequest = _equalsAsciiIgnoreCase(requestMethod, 'HEAD');
+
+  final Future<void> Function(BridgeResponseFrame frame) onStart;
+  final Future<void> Function(Uint8List chunkBytes) onChunk;
+
+  _BridgeHttpHeaders? _headers;
+  List<Cookie>? _cookies;
+  final Completer<void> _done = Completer<void>();
+  BridgeDetachedSocket? _detachedSocket;
+  Future<void> _pendingWrite = Future<void>.value();
+  bool _closed = false;
+  bool _started = false;
+  bool _detachedWriteHeaders = true;
+  Encoding _encoding = latin1;
+  bool _encodingSet = false;
+  int _bytesWritten = 0;
+  bool _autoCompressEnabled = false;
+  bool _requestAcceptsGzip = false;
+  bool _compressBody = false;
+  BytesBuilder? _compressionBuffer;
+  final BridgeConnectionInfo _connectionInfo;
+  final void Function(BridgeDetachedSocket detachedSocket)? _onDetachedSocket;
+  final bool _isHeadRequest;
+
+  bool get isClosed => _closed;
+
+  /// Enables gzip auto-compression based on request/response negotiation.
+  void configureAutoCompression({
+    required bool enabled,
+    required bool requestAcceptsGzip,
+  }) {
+    _autoCompressEnabled = enabled;
+    _requestAcceptsGzip = requestAcceptsGzip;
+  }
+
+  @override
+  int statusCode = HttpStatus.ok;
+
+  @override
+  String reasonPhrase = 'OK';
+
+  @override
+  bool get persistentConnection => headers.persistentConnection;
+
+  @override
+  set persistentConnection(bool value) {
+    headers.persistentConnection = value;
+  }
+
+  @override
+  Duration? deadline;
+
+  @override
+  bool bufferOutput = true;
+
+  @override
+  HttpHeaders get headers => _headers ??= _BridgeHttpHeaders();
+
+  @override
+  List<Cookie> get cookies => _cookies ??= <Cookie>[];
+
+  @override
+  int get contentLength => _headers?.contentLength ?? -1;
+
+  @override
+  set contentLength(int value) => headers.contentLength = value;
+
+  @override
+  HttpConnectionInfo? get connectionInfo => _connectionInfo;
+
+  @override
+  void add(List<int> data) {
+    _ensureOpen();
+    if (data.isEmpty) {
+      return;
+    }
+    final chunk = data is Uint8List ? data : Uint8List.fromList(data);
+    _enqueueWrite(() async {
+      await _ensureStarted();
+      _validateContentLengthOnAdd(chunk.length);
+      if (_compressBody) {
+        (_compressionBuffer ??= BytesBuilder(copy: false)).add(chunk);
+        return;
+      }
+      await onChunk(chunk);
+    });
+  }
+
+  @override
+  Future<void> addStream(Stream<List<int>> stream) async {
+    _ensureOpen();
+    // Emit response start as soon as body streaming begins so the Rust side
+    // can flush status/headers even if first body chunk arrives later.
+    _enqueueWrite(() async {
+      await _ensureStarted();
+    });
+    await _pendingWrite;
+    await for (final chunk in stream) {
+      add(chunk);
+    }
+    await _pendingWrite;
+  }
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {
+    if (!_done.isCompleted) {
+      _done.completeError(error, stackTrace);
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    _enqueueWrite(() async {
+      await _ensureStarted();
+      _validateContentLengthOnClose();
+      if (_compressBody) {
+        final buffered = _compressionBuffer?.takeBytes() ?? Uint8List(0);
+        if (buffered.isNotEmpty) {
+          await onChunk(Uint8List.fromList(gzip.encode(buffered)));
+        }
+      }
+    });
+    await _pendingWrite;
+    if (!_done.isCompleted) {
+      _done.complete();
+    }
+  }
+
+  @override
+  Future<void> get done => _done.future;
+
+  @override
+  Encoding get encoding {
+    if (_encodingSet) {
+      return _encoding;
+    }
+    final charset = headers.contentType?.charset ?? 'iso-8859-1';
+    return Encoding.getByName(charset) ?? latin1;
+  }
+
+  @override
+  set encoding(Encoding value) {
+    _encoding = value;
+    _encodingSet = true;
+  }
+
+  @override
+  void write(Object? object) {
+    if (!_encodingSet) {
+      _encoding = encoding;
+      _encodingSet = true;
+    }
+    add(_encoding.encode(object?.toString() ?? ''));
+  }
+
+  @override
+  void writeAll(Iterable<Object?> objects, [String separator = '']) =>
+      write(objects.join(separator));
+
+  @override
+  void writeCharCode(int charCode) => write(String.fromCharCode(charCode));
+
+  @override
+  void writeln([Object? object = '']) => write('$object\n');
+
+  @override
+  Future<void> flush() async => _pendingWrite;
+
+  @override
+  Future<void> redirect(
+    Uri location, {
+    int status = HttpStatus.movedTemporarily,
+  }) async {
+    headers.set(HttpHeaders.locationHeader, location.toString());
+    statusCode = status;
+    await close();
+  }
+
+  @override
+  Future<Socket> detachSocket({bool writeHeaders = true}) async {
+    _ensureOpen();
+    if (_detachedSocket != null) {
+      throw StateError('Response socket has already been detached');
+    }
+    _detachedWriteHeaders = writeHeaders;
+    final detached = await _createDetachedSocketPair();
+    _detachedSocket = detached;
+    _onDetachedSocket?.call(detached);
+    if (_detachedWriteHeaders) {
+      await _ensureStarted();
+    } else {
+      final manualDetachedStart = _emitManualDetachedStart(detached);
+      unawaited(
+        manualDetachedStart
+            .then((_) {
+              if (!_done.isCompleted) {
+                _done.complete();
+              }
+            })
+            .catchError((error, stack) {
+              if (!_done.isCompleted) {
+                _done.completeError(error, stack);
+              }
+            }),
+      );
+    }
+    _closed = true;
+    if (_detachedWriteHeaders && !_done.isCompleted) {
+      _done.complete();
+    }
+    return detached.applicationSocket;
+  }
+
+  Future<void> _emitManualDetachedStart(BridgeDetachedSocket detached) async {
+    final preface = await _readDetachedHttpResponsePreface(detached);
+    detached.stashPrefetchedTunnelBytes(preface.trailingBytes);
+    _started = true;
+    await onStart(
+      BridgeResponseFrame.fromHeaderPairs(
+        status: preface.status,
+        headerNames: preface.headerNames,
+        headerValues: preface.headerValues,
+        bodyBytes: Uint8List(0),
+        detachedSocket: detached,
+      ),
+    );
+  }
+
+  Future<void> _ensureStarted() async {
+    if (_started) {
+      return;
+    }
+    _started = true;
+    _compressBody = _shouldCompressBody();
+    if (_compressBody) {
+      final compressionHeaders = headers;
+      compressionHeaders.set(HttpHeaders.contentEncodingHeader, 'gzip');
+      compressionHeaders.contentLength = -1;
+    }
+
+    final bridgeHeaders = _headers;
+    final cookies = _cookies;
+    final headerCount =
+        (bridgeHeaders?.flattenedHeaderPairCount ?? 0) + (cookies?.length ?? 0);
+    final headerNames = headerCount == 0
+        ? const <String>[]
+        : List<String>.filled(headerCount, '', growable: false);
+    final headerValues = headerCount == 0
+        ? const <String>[]
+        : List<String>.filled(headerCount, '', growable: false);
+
+    if (headerCount != 0) {
+      var offset = 0;
+      if (bridgeHeaders != null) {
+        offset = bridgeHeaders.writeFlattenedHeaderPairs(
+          headerNames,
+          headerValues,
+          offset,
+        );
+      }
+      if (cookies != null) {
+        for (final cookie in cookies) {
+          headerNames[offset] = HttpHeaders.setCookieHeader;
+          headerValues[offset] = cookie.toString();
+          offset++;
+        }
+      }
+    }
+
+    await onStart(
+      BridgeResponseFrame.fromHeaderPairs(
+        status: statusCode,
+        headerNames: headerNames,
+        headerValues: headerValues,
+        bodyBytes: Uint8List(0),
+        detachedSocket: _detachedSocket,
+      ),
+    );
+  }
+
+  void _enqueueWrite(Future<void> Function() action) {
+    _pendingWrite = _pendingWrite.then((_) => action()).catchError((
+      error,
+      stack,
+    ) {
+      if (!_done.isCompleted) {
+        _done.completeError(error, stack);
+      }
+    });
+  }
+
+  void _ensureOpen() {
+    if (_closed) {
+      throw StateError('Response is already closed');
+    }
+  }
+
+  bool _shouldCompressBody() {
+    if (!_autoCompressEnabled || !_requestAcceptsGzip) {
+      return false;
+    }
+    final contentEncoding = _headers?.value(HttpHeaders.contentEncodingHeader);
+    if (contentEncoding != null && contentEncoding.isNotEmpty) {
+      return false;
+    }
+    return true;
+  }
+
+  void _validateContentLengthOnAdd(int length) {
+    final declaredContentLength = headers.contentLength;
+    if (declaredContentLength < 0 || headers.chunkedTransferEncoding) {
+      _bytesWritten += length;
+      return;
+    }
+
+    final nextBytesWritten = _bytesWritten + length;
+    if (nextBytesWritten > declaredContentLength) {
+      throw HttpException(
+        'Content size exceeds specified contentLength. '
+        '$nextBytesWritten bytes written while expected $declaredContentLength.',
+      );
+    }
+    _bytesWritten = nextBytesWritten;
+  }
+
+  void _validateContentLengthOnClose() {
+    final declaredContentLength = headers.contentLength;
+    if (declaredContentLength < 0 || headers.chunkedTransferEncoding) {
+      return;
+    }
+    if (_skipContentLengthValidationOnClose()) {
+      return;
+    }
+    if (_bytesWritten < declaredContentLength) {
+      throw HttpException(
+        'Content size below specified contentLength. '
+        '$_bytesWritten bytes written but expected $declaredContentLength.',
+      );
+    }
+  }
+
+  bool _skipContentLengthValidationOnClose() {
+    if (_isHeadRequest) {
+      return true;
+    }
+    final status = statusCode;
+    return (status >= 100 && status < 200) ||
+        status == HttpStatus.noContent ||
+        status == HttpStatus.notModified;
+  }
+}
