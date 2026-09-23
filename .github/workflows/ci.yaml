@@ -52,9 +52,27 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
+      - name: Regenerate and verify Zig bindings
+        run: |
+          dart run native_toolchain_zig:zig bindings \
+            --package-root . \
+            --zig-dir zig \
+            --root-source-file src/lib.zig \
+            --output lib/src/zig_ffi.g.dart \
+            --asset-id package:server_native/src/zig_ffi.g.dart
+          dart format lib/src/zig_ffi.g.dart
+          git diff --exit-code -- lib/src/zig_ffi.g.dart
+
       - name: Build Zig library
         run: zig build
         working-directory: zig
+
+      - name: Run Zig unit tests
+        run: zig build test
+        working-directory: zig
+
+      - name: Check changed Dart formatting
+        run: dart format --output=none --set-exit-if-changed hook/build.dart lib/src/zig_ffi.g.dart test/zig_dart_api_test.dart
 
       - name: Analyze Dart sources
         run: dart analyze --fatal-infos
@@ -63,3 +81,4 @@ jobs:
         run: |
           dart test test/serve_ffi_http_test.dart
           dart test test/native_proxy_failure_test.dart
+          dart test test/zig_dart_api_test.dart
