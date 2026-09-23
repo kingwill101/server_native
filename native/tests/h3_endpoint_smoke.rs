@@ -7,8 +7,8 @@ use std::time::Duration;
 
 fn tls_assets() -> (PathBuf, PathBuf) {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let cert = crate_dir.join("../../../examples/http2/cert.pem");
-    let key = crate_dir.join("../../../examples/http2/key.pem");
+    let cert = crate_dir.join("../examples/http2/cert.pem");
+    let key = crate_dir.join("../examples/http2/key.pem");
     assert!(cert.exists(), "missing cert asset: {}", cert.display());
     assert!(key.exists(), "missing key asset: {}", key.display());
     (cert, key)
