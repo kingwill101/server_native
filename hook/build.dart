@@ -4,10 +4,13 @@ import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_prebuilt/hooks.dart';
 import 'package:native_toolchain_rust/native_toolchain_rust.dart';
+import 'package:native_toolchain_zig/native_toolchain_zig.dart';
 import 'package:server_native/src/generated/server_native_prebuilts.g.dart';
 
 const _assetName = 'src/ffi.g.dart';
 const _cratePath = 'native';
+const _zigAssetName = 'src/zig_ffi.g.dart';
+const _zigDir = 'zig';
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
@@ -33,11 +36,25 @@ Future<void> main(List<String> args) async {
         ),
       ),
     ).run(input: input, output: output, logger: null);
+
+    await ZigBuilder(
+      assetName: _zigAssetName,
+      zigDir: _zigDir,
+    ).run(input: input, output: output, logger: null);
   });
 }
 
 bool _isWorkspaceCheckout(Uri packageRoot) {
-  var directory = Directory.fromUri(packageRoot).absolute;
+  final packageDirectory = Directory.fromUri(packageRoot).absolute;
+  final hasGitMetadata =
+      Directory('${packageDirectory.path}/.git').existsSync() ||
+      File('${packageDirectory.path}/.git').existsSync();
+  if (hasGitMetadata &&
+      File('${packageDirectory.path}/native/Cargo.toml').existsSync()) {
+    return true;
+  }
+
+  var directory = packageDirectory;
   while (true) {
     final hasPackages = Directory('${directory.path}/packages').existsSync();
     if (File('${directory.path}/pubspec.yaml').existsSync() && hasPackages) {
