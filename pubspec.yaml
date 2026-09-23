@@ -13,22 +13,24 @@ tags:
 funding:
   - https://www.buymeacoffee.com/kingwill101
 
-resolution: workspace
-
 executables:
   setup:
 
 environment:
-  sdk: '>=3.10.4 <4.0.0'
+  sdk: ^3.13.0
 
 dependencies:
   code_assets: ^1.2.1
   contextual: ^2.2.0
   ffi: ^2.1.4
-  hooks: ^2.1.0
+  hooks: ^2.2.0
   native_prebuilt: ^0.4.0
   json_annotation: ^4.10.0
   native_toolchain_rust: ^1.0.3
+  native_toolchain_zig:
+    git:
+      url: https://github.com/kingwill101/native_toolchain_zig.dart.git
+      ref: cimport-generator-wip
 
 dev_dependencies:
   ffigen: ^20.1.1
