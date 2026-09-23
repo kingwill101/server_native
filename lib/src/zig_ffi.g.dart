@@ -7,9 +7,7 @@ library;
 
 import 'dart:ffi' as ffi;
 
-@ffi.Native<ffi.Int32 Function()>(
-  symbol: 'server_native_transport_version',
-)
+@ffi.Native<ffi.Int32 Function()>(symbol: 'server_native_transport_version')
 external int server_native_transport_version();
 
 @ffi.Native<ffi.IntPtr Function(ffi.Pointer<ffi.Void>)>(
