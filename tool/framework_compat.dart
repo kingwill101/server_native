@@ -19,8 +19,9 @@ Future<void> main(List<String> args) async {
     return;
   }
 
-  final repoRoot = _findRepoRoot();
-  final packageRoot = p.join(repoRoot.path, 'packages', 'server_native');
+  final roots = _findRoots();
+  final repoRoot = roots.repoRoot;
+  final packageRoot = roots.packageRoot.path;
   final patchesRoot = p.join(
     packageRoot,
     'tool',
@@ -719,20 +720,32 @@ Future<void> _runChecked(
   }
 }
 
-Directory _findRepoRoot() {
+({Directory repoRoot, Directory packageRoot}) _findRoots() {
   var current = Directory.current.absolute;
   while (true) {
-    final marker = File(
-      p.join(current.path, 'packages', 'server_native', 'pubspec.yaml'),
+    final standalonePubspec = File(p.join(current.path, 'pubspec.yaml'));
+    final standaloneTool = File(
+      p.join(current.path, 'tool', 'framework_compat.dart'),
     );
-    if (marker.existsSync()) {
-      return current;
+    if (standalonePubspec.existsSync() && standaloneTool.existsSync()) {
+      final packagesDirectory = current.parent;
+      final repoRoot = p.basename(packagesDirectory.path) == 'packages'
+          ? packagesDirectory.parent
+          : current;
+      return (repoRoot: repoRoot, packageRoot: current);
+    }
+
+    final monorepoPackage = Directory(
+      p.join(current.path, 'packages', 'server_native'),
+    );
+    if (File(p.join(monorepoPackage.path, 'pubspec.yaml')).existsSync()) {
+      return (repoRoot: current, packageRoot: monorepoPackage);
     }
 
     final parent = current.parent;
     if (parent.path == current.path) {
       throw StateError(
-        'Could not locate repository root containing packages/server_native/pubspec.yaml',
+        'Could not locate the server_native package root.',
       );
     }
     current = parent;
@@ -744,7 +757,7 @@ void _printUsage() {
 server_native framework compatibility runner
 
 Usage:
-  dart run packages/server_native/tool/framework_compat.dart [options]
+  dart run tool/framework_compat.dart [options]
 
 Options:
   --workspace-root=<path>   Checkout workspace root.
