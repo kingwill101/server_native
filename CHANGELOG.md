@@ -4,6 +4,8 @@ All notable changes to `server_native` will be documented in this file.
 
 ## Unreleased
 
+- Added a Zig Dart API-DL bridge smoke test while retaining Rust as the active HTTP transport.
+
 - Added verified prebuilt-native metadata and streamlined native asset
   resolution for supported platforms.
 - Expanded native HTTP compatibility coverage for callbacks, headers,
