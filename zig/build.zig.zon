@@ -1,0 +1,12 @@
+.{
+    .name = .dart_api,
+    .version = "0.1.0",
+    .fingerprint = 0x97d0c25577e04d85,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "include",
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
