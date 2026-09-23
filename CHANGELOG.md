@@ -4,6 +4,10 @@ All notable changes to `server_native` will be documented in this file.
 
 ## Unreleased
 
+- Added an additive Zig native-assets scaffold using Dart API-DL C headers,
+  while keeping the Rust transport and prebuilt/source fallback active.
+- Added a Dart-port message smoke test and CI coverage for Zig 0.15.2 and 0.16.0.
+
 - Added verified prebuilt-native metadata and streamlined native asset
   resolution for supported platforms.
 - Expanded native HTTP compatibility coverage for callbacks, headers,
