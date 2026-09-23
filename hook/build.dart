@@ -40,6 +40,7 @@ Future<void> main(List<String> args) async {
     await ZigBuilder(
       assetName: _zigAssetName,
       zigDir: _zigDir,
+      libraryName: 'server_native_zig',
     ).run(input: input, output: output, logger: null);
   });
 }
