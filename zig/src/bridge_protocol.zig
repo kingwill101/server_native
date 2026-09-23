@@ -92,8 +92,22 @@ pub fn encodeTerminal(frame_type: FrameType, out: []u8) Error![]const u8 {
 pub fn frameType(payload: []const u8) Error!FrameType {
     if (payload.len < 2) return error.TruncatedPayload;
     if (payload[0] != protocol_version) return error.UnsupportedVersion;
-    return std.meta.intToEnum(FrameType, payload[1]) catch {
-        return error.UnexpectedFrameType;
+    return switch (payload[1]) {
+        1 => .request,
+        2 => .response,
+        3 => .request_start,
+        4 => .request_chunk,
+        5 => .request_end,
+        6 => .response_start,
+        7 => .response_chunk,
+        8 => .response_end,
+        9 => .tunnel_chunk,
+        10 => .tunnel_close,
+        11 => .request_tokenized,
+        12 => .response_tokenized,
+        13 => .request_start_tokenized,
+        14 => .response_start_tokenized,
+        else => error.UnexpectedFrameType,
     };
 }
 
