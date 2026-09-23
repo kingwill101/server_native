@@ -1,3 +1,5 @@
 .dart_tool/
 build/
 native/target/
+zig/.zig-cache/
+zig/zig-out/
