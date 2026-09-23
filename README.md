@@ -4,8 +4,8 @@
 [![pub points](https://img.shields.io/pub/points/server_native)](https://pub.dev/packages/server_native/score)
 [![popularity](https://img.shields.io/pub/popularity/server_native)](https://pub.dev/packages/server_native/score)
 [![likes](https://img.shields.io/pub/likes/server_native)](https://pub.dev/packages/server_native/score)
-[![server_native CI](https://github.com/kingwill101/routed/actions/workflows/server_native_ci.yml/badge.svg?branch=master)](https://github.com/kingwill101/routed/actions/workflows/server_native_ci.yml)
-[![framework compat](https://github.com/kingwill101/routed/actions/workflows/server_native_framework_compat.yml/badge.svg?branch=master)](https://github.com/kingwill101/routed/actions/workflows/server_native_framework_compat.yml)
+[![server_native CI](https://github.com/kingwill101/server_native/actions/workflows/server_native_ci.yml/badge.svg?branch=main)](https://github.com/kingwill101/server_native/actions/workflows/server_native_ci.yml)
+[![framework compat](https://github.com/kingwill101/server_native/actions/workflows/server_native_framework_compat.yml/badge.svg?branch=main)](https://github.com/kingwill101/server_native/actions/workflows/server_native_framework_compat.yml)
 
 `server_native` provides a Rust-backed HTTP server runtime for Dart with a
 `dart:io`-like programming model.
@@ -13,9 +13,17 @@ For most server code, it is intended to be a drop-in replacement for
 `HttpServer`: keep the same request/response handling and swap only the bind
 bootstrap.
 
+## Zig Migration Status
+
+The Rust HTTP transport remains active and continues to provide the existing
+HTTP/1.1, HTTP/2, and HTTP/3 behavior. The Zig code currently builds a native
+asset and demonstrates Dart API-DL initialization and message delivery; it is
+not yet serving HTTP traffic.
+
 ## Table Of Contents
 
 - [Install](#install)
+- [Zig Migration Status](#zig-migration-status)
 - [Quick Start (`HttpServer` Style)](#quick-start-httpserver-style)
 - [Drop-In `HttpServer` Replacement](#drop-in-httpserver-replacement)
 - [Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)](#protocol-support-http11-http2-http3)
@@ -97,6 +105,8 @@ Future<void> main() async {
 ```
 
 ## Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)
+
+The protocol support below is still provided by the Rust transport.
 
 - HTTP/1.1: supported for plaintext and TLS servers.
 - HTTP/2: controlled explicitly with `http2` (defaults to `true`).
