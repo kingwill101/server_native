@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci.yaml"
+      - "hook/**"
+      - "lib/**"
+      - "native/**"
+      - "zig/**"
+      - "test/**"
+      - "analysis_options.yaml"
+      - "native_prebuilt.yaml"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci.yaml"
+      - "hook/**"
+      - "lib/**"
+      - "native/**"
+      - "zig/**"
+      - "test/**"
+      - "analysis_options.yaml"
+      - "native_prebuilt.yaml"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Zig ${{ matrix.zig-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig-version: [0.15.2, 0.16.0]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Regenerate Zig bindings
+        run: dart run native_toolchain_zig:zig bindings --package-root . --root-source-file zig/src/lib.zig --output lib/src/zig_ffi.g.dart --asset-id package:server_native/src/zig_ffi.g.dart
+
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze project
+        run: dart analyze --fatal-infos
+
+      - name: Run Zig tests
+        run: zig build test
+        working-directory: zig
+
+      - name: Run Dart tests
+        run: dart test
