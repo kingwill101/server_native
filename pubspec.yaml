@@ -1,34 +1,37 @@
 name: server_native
-description: Rust-backed transport boot APIs for Dart HTTP servers.
+description: Dart HTTP server runtime with a Rust transport and Zig migration scaffold.
 version: 0.1.3+1
-homepage: https://github.com/kingwill101/routed/tree/master/packages/server_native
-repository: https://github.com/kingwill101/routed
-issue_tracker: https://github.com/kingwill101/routed/issues
-documentation: https://github.com/kingwill101/routed/tree/master/packages/server_native#readme
+homepage: https://github.com/kingwill101/server_native
+repository: https://github.com/kingwill101/server_native
+issue_tracker: https://github.com/kingwill101/server_native/issues
+documentation: https://github.com/kingwill101/server_native#readme
 tags:
   - server
   - ffi
   - rust
+  - zig
 
 funding:
   - https://www.buymeacoffee.com/kingwill101
-
-resolution: workspace
 
 executables:
   setup:
 
 environment:
-  sdk: '>=3.10.4 <4.0.0'
+  sdk: ^3.13.0
 
 dependencies:
-  code_assets: ^1.2.1
+  code_assets: ^2.1.0
   contextual: ^2.2.0
-  ffi: ^2.1.4
-  hooks: ^2.1.0
-  native_prebuilt: ^0.4.0
+  ffi: ^2.2.0
+  hooks: ^2.2.0
+  native_prebuilt: ^0.5.0
   json_annotation: ^4.10.0
   native_toolchain_rust: ^1.0.3
+  native_toolchain_zig:
+    git:
+      url: https://github.com/kingwill101/native_toolchain_zig.dart.git
+      ref: cimport-generator-wip
 
 dev_dependencies:
   ffigen: ^20.1.1
