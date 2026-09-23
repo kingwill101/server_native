@@ -4,10 +4,13 @@ import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_prebuilt/hooks.dart';
 import 'package:native_toolchain_rust/native_toolchain_rust.dart';
+import 'package:native_toolchain_zig/native_toolchain_zig.dart';
 import 'package:server_native/src/generated/server_native_prebuilts.g.dart';
 
 const _assetName = 'src/ffi.g.dart';
 const _cratePath = 'native';
+const _zigAssetName = 'src/zig_ffi.g.dart';
+const _zigLibraryName = 'server_native_zig';
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
@@ -18,9 +21,9 @@ Future<void> main(List<String> args) async {
       libraryStem: 'server_native',
       manifest: serverNativePrebuilts,
       linkModeResolver: (_) => DynamicLoadingBundled(),
-      // A workspace checkout must exercise the current Rust sources. Published
-      // packages use native_prebuilt's verified release/cache resolution.
-      resolvers: _isWorkspaceCheckout(input.packageRoot)
+      // Source checkouts exercise the current Rust sources. Published packages
+      // use native_prebuilt's verified release/cache resolution.
+      resolvers: _isSourceCheckout(input.packageRoot)
           ? const <PrebuiltResolver>[]
           : null,
       sourceFallback: SourceFallback(
@@ -33,12 +36,22 @@ Future<void> main(List<String> args) async {
         ),
       ),
     ).run(input: input, output: output, logger: null);
+
+    await const ZigBuilder(
+      assetName: _zigAssetName,
+      zigDir: 'zig',
+      libraryName: _zigLibraryName,
+    ).run(input: input, output: output);
   });
 }
 
-bool _isWorkspaceCheckout(Uri packageRoot) {
+bool _isSourceCheckout(Uri packageRoot) {
   var directory = Directory.fromUri(packageRoot).absolute;
   while (true) {
+    if (File('${directory.path}/.git').existsSync() ||
+        Directory('${directory.path}/.git').existsSync()) {
+      return true;
+    }
     final hasPackages = Directory('${directory.path}/packages').existsSync();
     if (File('${directory.path}/pubspec.yaml').existsSync() && hasPackages) {
       return true;

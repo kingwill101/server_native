@@ -1,0 +1,65 @@
+name: Zig CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci.yaml"
+      - "hook/**"
+      - "lib/**"
+      - "native/**"
+      - "pubspec.yaml"
+      - "test/**"
+      - "zig/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci.yaml"
+      - "hook/**"
+      - "lib/**"
+      - "native/**"
+      - "pubspec.yaml"
+      - "test/**"
+      - "zig/**"
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Zig ${{ matrix.zig-version }} / Dart integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        zig-version: [0.15.2, 0.16.0]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Build Zig library
+        run: zig build
+        working-directory: zig
+
+      - name: Analyze Dart sources
+        run: dart analyze --fatal-infos
+
+      - name: Run Dart integration tests
+        run: |
+          dart test test/serve_ffi_http_test.dart
+          dart test test/native_proxy_failure_test.dart
