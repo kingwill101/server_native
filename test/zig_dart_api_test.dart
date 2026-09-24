@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -74,18 +73,107 @@ void main() {
       expect(queue, isNot(ffi.nullptr));
       addTearDown(() => server_native_zig_queue_destroy(queue));
 
-      final descriptorBytes = _encodeRequestHeadDescriptor(
-        method: 'GET',
-        scheme: 'http',
-        authority: 'example.com',
-        path: '/hello',
-        query: '',
-        protocol: 'HTTP/1.1',
-        headers: const <(String, String)>[
-          ('host', 'example.com'),
-          ('x-test', 'ok'),
-        ],
-      );
+      final descriptorBytes = Uint8List.fromList(const <int>[
+        0,
+        0,
+        0,
+        3,
+        71,
+        69,
+        84,
+        0,
+        0,
+        0,
+        4,
+        104,
+        116,
+        116,
+        112,
+        0,
+        0,
+        0,
+        11,
+        101,
+        120,
+        97,
+        109,
+        112,
+        108,
+        101,
+        46,
+        99,
+        111,
+        109,
+        0,
+        0,
+        0,
+        6,
+        47,
+        104,
+        101,
+        108,
+        108,
+        111,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        8,
+        72,
+        84,
+        84,
+        80,
+        47,
+        49,
+        46,
+        49,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        0,
+        4,
+        104,
+        111,
+        115,
+        116,
+        0,
+        0,
+        0,
+        11,
+        101,
+        120,
+        97,
+        109,
+        112,
+        108,
+        101,
+        46,
+        99,
+        111,
+        109,
+        0,
+        0,
+        0,
+        6,
+        120,
+        45,
+        116,
+        101,
+        115,
+        116,
+        0,
+        0,
+        0,
+        2,
+        111,
+        107,
+      ]);
       final descriptor = pkg_ffi.calloc<ffi.Uint8>(descriptorBytes.length);
       addTearDown(() => pkg_ffi.calloc.free(descriptor));
       for (var i = 0; i < descriptorBytes.length; i++) {
@@ -113,7 +201,105 @@ void main() {
       expect(values[0], 91);
       expect(
         values[1],
-        Uint8List.fromList(_expectedTokenizedRequestStart()),
+        Uint8List.fromList(const <int>[
+        1,
+        13,
+        0,
+        0,
+        0,
+        3,
+        71,
+        69,
+        84,
+        0,
+        0,
+        0,
+        4,
+        104,
+        116,
+        116,
+        112,
+        0,
+        0,
+        0,
+        11,
+        101,
+        120,
+        97,
+        109,
+        112,
+        108,
+        101,
+        46,
+        99,
+        111,
+        109,
+        0,
+        0,
+        0,
+        6,
+        47,
+        104,
+        101,
+        108,
+        108,
+        111,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        8,
+        72,
+        84,
+        84,
+        80,
+        47,
+        49,
+        46,
+        49,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        11,
+        101,
+        120,
+        97,
+        109,
+        112,
+        108,
+        101,
+        46,
+        99,
+        111,
+        109,
+        255,
+        255,
+        0,
+        0,
+        0,
+        6,
+        120,
+        45,
+        116,
+        101,
+        115,
+        116,
+        0,
+        0,
+        0,
+        2,
+        111,
+        107,
+      ]),
       );
     });
 
@@ -124,71 +310,3 @@ void main() {
   });
 }
 
-Uint8List _encodeRequestHeadDescriptor({
-  required String method,
-  required String scheme,
-  required String authority,
-  required String path,
-  required String query,
-  required String protocol,
-  required List<(String, String)> headers,
-}) {
-  final builder = BytesBuilder(copy: false);
-  for (final field in <String>[
-    method,
-    scheme,
-    authority,
-    path,
-    query,
-    protocol,
-  ]) {
-    _appendLengthPrefixedBytes(builder, utf8.encode(field));
-  }
-  _appendU32(builder, headers.length);
-  for (final (name, value) in headers) {
-    _appendLengthPrefixedBytes(builder, utf8.encode(name));
-    _appendLengthPrefixedBytes(builder, utf8.encode(value));
-  }
-  return builder.takeBytes();
-}
-
-List<int> _expectedTokenizedRequestStart() => <int>[
-  1,
-  13,
-  ..._field('GET'),
-  ..._field('http'),
-  ..._field('example.com'),
-  ..._field('/hello'),
-  ..._field(''),
-  ..._field('HTTP/1.1'),
-  ..._u32(2),
-  ..._u16(0),
-  ..._field('example.com'),
-  ..._u16(0xffff),
-  ..._field('x-test'),
-  ..._field('ok'),
-];
-
-List<int> _field(String value) => _lengthPrefixedBytes(utf8.encode(value));
-
-List<int> _lengthPrefixedBytes(List<int> value) => <int>[
-  ..._u32(value.length),
-  ...value,
-];
-
-void _appendLengthPrefixedBytes(BytesBuilder builder, List<int> value) {
-  _appendU32(builder, value.length);
-  builder.add(value);
-}
-
-void _appendU32(BytesBuilder builder, int value) {
-  final bytes = ByteData(4)..setUint32(0, value, Endian.big);
-  builder.add(bytes.buffer.asUint8List());
-}
-
-List<int> _u32(int value) {
-  final bytes = ByteData(4)..setUint32(0, value, Endian.big);
-  return bytes.buffer.asUint8List();
-}
-
-List<int> _u16(int value) => <int>[(value >> 8) & 0xff, value & 0xff];
