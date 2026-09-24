@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const bridge_protocol = @import("bridge_protocol.zig");
+const bridge_protocol = @import("bridge_protocol.zig");
 
 const c = @cImport({
     @cInclude("dart_api_dl.h");
