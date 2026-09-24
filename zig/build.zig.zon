@@ -33,6 +33,7 @@
     },
     .paths = .{
         "DEPENDENCIES.md",
+        "TESTING.md",
         "include",
         "src",
         "build.zig",

@@ -109,3 +109,21 @@ pub const nghttp3 = &[_][]const u8{
     "nghttp3_ratelim.c",
     "sfparse/sfparse.c",
 };
+
+test "protocol source manifests contain unique relative C files" {
+    const std = @import("std");
+    inline for (.{ nghttp2, ngtcp2, nghttp3 }) |files| {
+        var seen = std.StringHashMap(void).init(std.testing.allocator);
+        defer seen.deinit();
+        try std.testing.expect(files.len > 0);
+        for (files) |path| {
+            try std.testing.expect(std.mem.endsWith(u8, path, ".c"));
+            try std.testing.expect(!std.fs.path.isAbsolute(path));
+            var components = std.mem.splitScalar(u8, path, '/');
+            while (components.next()) |component| {
+                try std.testing.expect(component.len != 0 and !std.mem.eql(u8, component, ".."));
+            }
+            try std.testing.expect(!(try seen.getOrPut(path)).found_existing);
+        }
+    }
+}

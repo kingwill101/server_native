@@ -692,3 +692,23 @@ test "request encoded size matches all token and connection normalization branch
         try std.testing.expectError(error.BufferTooSmall, encodeRequestStart(head, out[0 .. size - 1]));
     };
 }
+
+test "request start rejects every undersized output buffer without overwriting guards" {
+    const head: RequestHead = .{ .method = "POST", .scheme = "https", .authority = "example.test", .path = "/echo", .query = "a=1", .protocol = "HTTP/3", .headers = &.{.{ .name = "x-custom", .value = "value" }} };
+    const size = try requestStartEncodedSize(head);
+    const buffer = try std.testing.allocator.alloc(u8, size + 2);
+    defer std.testing.allocator.free(buffer);
+    for (0..size) |length| {
+        @memset(buffer, 0xa5);
+        try std.testing.expectError(error.BufferTooSmall, encodeRequestStart(head, buffer[1..][0..length]));
+        try std.testing.expectEqual(@as(u8, 0xa5), buffer[0]);
+        for (buffer[length + 1 ..]) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    }
+    try std.testing.expectEqual(size, (try encodeRequestStart(head, buffer[1..][0..size])).len);
+}
+
+test "wire length decoder rejects oversized prefixes before requiring payload" {
+    try std.testing.expectError(error.FrameTooLarge, decodeWireFrame(&.{ 4, 0, 0, 1 }));
+    try std.testing.expectError(error.FrameTooLarge, decodeWireFrame(&.{ 255, 255, 255, 255 }));
+    try std.testing.expectEqualSlices(u8, "", try decodeWireFrame(&.{ 0, 0, 0, 0 }));
+}

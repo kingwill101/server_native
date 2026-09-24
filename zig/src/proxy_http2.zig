@@ -180,3 +180,75 @@ fn readResponse(context: *anyopaque, output: []u8, done: *bool) usize {
     done.* = request.response_done and remaining == 0;
     return count;
 }
+
+fn stateAllocation(allocator: std.mem.Allocator) !void {
+    var state: State = .{ .allocator = allocator, .requests = .init(allocator) };
+    defer {
+        var values = state.requests.valueIterator();
+        while (values.next()) |request| request.*.deinit();
+        state.requests.deinit();
+    }
+    if (!State.emit(&state, .{ .headers_begin = 1 })) return error.OutOfMemory;
+    const events = [_]http2.Event{
+        .{ .header = .{ .stream = 1, .field = .{ .name = ":method", .value = "GET" } } },
+        .{ .header = .{ .stream = 1, .field = .{ .name = ":method", .value = "POST" } } },
+        .{ .header = .{ .stream = 1, .field = .{ .name = ":path", .value = "/echo?q=1" } } },
+        .{ .header = .{ .stream = 1, .field = .{ .name = ":scheme", .value = "https" } } },
+        .{ .header = .{ .stream = 1, .field = .{ .name = ":authority", .value = "example.test" } } },
+        .{ .header = .{ .stream = 1, .field = .{ .name = "x-one", .value = "first" } } },
+        .{ .headers_end = 1 },
+        .{ .data = .{ .stream = 1, .bytes = "a\x00b" } },
+        .{ .end_stream = 1 },
+    };
+    for (events) |event| if (!State.emit(&state, event)) return error.OutOfMemory;
+    const request = state.requests.get(1).?;
+    try std.testing.expectEqualStrings("POST", request.method);
+    try std.testing.expectEqualStrings("/echo?q=1", request.path);
+    try std.testing.expectEqualStrings("https", request.scheme);
+    try std.testing.expectEqualStrings("example.test", request.authority);
+    try std.testing.expectEqualStrings("first", request.headers.items[0].value);
+    try std.testing.expectEqualSlices(u8, "a\x00b", request.body.items);
+    try std.testing.expectEqual(@as(usize, 3), request.uncredited_body);
+    try std.testing.expect(request.headers_ready and request.ended);
+    try std.testing.expect(State.emit(&state, .{ .headers_begin = 1 }));
+    try std.testing.expectEqual(@as(u32, 1), state.requests.count());
+    try std.testing.expect(State.emit(&state, .{ .closed = .{ .stream = 1, .code = 8 } }));
+    try std.testing.expect(request.cancelled);
+}
+
+test "HTTP2 dispatch owns request fields and cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stateAllocation, .{});
+}
+
+test "HTTP2 dispatch rejects data headers and EOF for unknown streams" {
+    var state: State = .{ .allocator = std.testing.allocator, .requests = .init(std.testing.allocator) };
+    defer state.requests.deinit();
+    try std.testing.expect(!State.emit(&state, .{ .header = .{ .stream = 7, .field = .{ .name = "x", .value = "y" } } }));
+    try std.testing.expect(!State.emit(&state, .{ .data = .{ .stream = 7, .bytes = "x" } }));
+    try std.testing.expect(!State.emit(&state, .{ .end_stream = 7 }));
+    try std.testing.expect(State.emit(&state, .{ .closed = .{ .stream = 7, .code = 8 } }));
+    try std.testing.expectEqual(@as(u32, 0), state.requests.count());
+}
+
+test "HTTP2 response producer preserves suffixes and emits EOF only after final bytes" {
+    const a = std.testing.allocator;
+    const request = try a.create(Request);
+    request.* = .{ .allocator = a };
+    defer request.deinit();
+    var output: [3]u8 = undefined;
+    var done = true;
+    try std.testing.expectEqual(@as(usize, 0), readResponse(request, &output, &done));
+    try std.testing.expect(!done);
+    try request.response.body.appendSlice(a, "abcde");
+    try std.testing.expectEqual(@as(usize, 0), readResponse(request, output[0..0], &done));
+    try std.testing.expectEqual(@as(usize, 3), readResponse(request, &output, &done));
+    try std.testing.expectEqualStrings("abc", &output);
+    try std.testing.expectEqualStrings("de", request.response.body.items);
+    try std.testing.expect(!done);
+    request.response_done = true;
+    try std.testing.expectEqual(@as(usize, 2), readResponse(request, &output, &done));
+    try std.testing.expectEqualStrings("de", output[0..2]);
+    try std.testing.expect(done);
+    try std.testing.expectEqual(@as(usize, 0), readResponse(request, &output, &done));
+    try std.testing.expect(done);
+}

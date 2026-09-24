@@ -843,3 +843,84 @@ test "HTTP2 control inspection cannot bypass required CONTINUATION" {
     _ = try server.receive(&.{ 0, 0, 4, 8, 0, 0, 0, 0, 1, 127, 255, 255, 255 });
     try expectControl(server, c.NGHTTP2_GOAWAY, 0, c.NGHTTP2_PROTOCOL_ERROR);
 }
+
+test "HTTP2 deferred response resumes incrementally while a sibling finishes" {
+    const Source = struct {
+        pending: []const u8 = "",
+        ended: bool = false,
+        fn read(context: *anyopaque, output: []u8, done: *bool) usize {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const count = @min(output.len, self.pending.len);
+            @memcpy(output[0..count], self.pending[0..count]);
+            self.pending = self.pending[count..];
+            done.* = self.ended and self.pending.len == 0;
+            return count;
+        }
+    };
+    var source: Source = .{};
+    var probe: Probe = .{};
+    const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+    defer server.destroy();
+    var client: Client = .{};
+    try client.init();
+    defer client.deinit();
+    const slow = try client.request();
+    const fast = try client.request();
+    try client.toServer(server);
+    try server.respondStreaming(slow, 200, &.{}, .{ .context = &source, .read = Source.read });
+    try server.respond(fast, 200, &.{}, "fast");
+    try client.fromServer(server);
+    try std.testing.expectEqualStrings("fast", client.received.items);
+    try std.testing.expect(server.bodies.get(slow).?.deferred);
+    try std.testing.expectEqual(@as(usize, 1), probe.closed);
+    for ([_][]const u8{ "one", "two" }) |part| {
+        source.pending = part;
+        try server.resumeResponse(slow);
+        try server.resumeResponse(slow);
+        try client.fromServer(server);
+        try std.testing.expect(server.bodies.get(slow).?.deferred);
+    }
+    try std.testing.expectEqualStrings("fastonetwo", client.received.items);
+    source.ended = true;
+    try server.resumeResponse(slow);
+    try client.fromServer(server);
+    try std.testing.expectEqual(@as(usize, 2), probe.closed);
+    try std.testing.expectEqual(@as(u32, 0), server.bodies.count());
+    try std.testing.expectEqual(@as(usize, 0), server.queued_bytes);
+    try server.resumeResponse(slow); // A retired stream cannot restart a producer.
+}
+
+test "HTTP2 cancelling a deferred producer never calls it again" {
+    const Source = struct {
+        calls: usize = 0,
+        fn read(context: *anyopaque, _: []u8, done: *bool) usize {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            done.* = false;
+            return 0;
+        }
+    };
+    var source: Source = .{};
+    var probe: Probe = .{};
+    const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+    defer server.destroy();
+    var client: Client = .{};
+    try client.init();
+    defer client.deinit();
+    const stream = try client.request();
+    try client.toServer(server);
+    try server.respondStreaming(stream, 200, &.{}, .{ .context = &source, .read = Source.read });
+    try client.fromServer(server);
+    try std.testing.expectEqual(@as(usize, 1), source.calls);
+    try std.testing.expectEqual(@as(c_int, 0), c.nghttp2_submit_rst_stream(client.native, 0, stream, c.NGHTTP2_CANCEL));
+    try client.toServer(server);
+    try server.resumeResponse(stream);
+    try client.fromServer(server);
+    try std.testing.expectEqual(@as(usize, 1), source.calls);
+    try std.testing.expectEqual(@as(u32, 0), server.bodies.count());
+    const next = try client.request();
+    try client.toServer(server);
+    try server.respond(next, 200, &.{}, "alive");
+    try client.fromServer(server);
+    try std.testing.expectEqualStrings("alive", client.received.items);
+}

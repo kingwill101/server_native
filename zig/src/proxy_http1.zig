@@ -300,6 +300,7 @@ fn hasChunkedEncoding(headers: []const u8) bool {
 
 fn decodeChunkedBody(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
     var offset: usize = 0;
     while (true) {
         const line_end = std.mem.indexOfPos(u8, encoded, offset, "\r\n") orelse return error.InvalidChunkedBody;
@@ -443,4 +444,138 @@ fn asciiEqualIgnoreCase(left: []const u8, right: []const u8) bool {
         if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
     }
     return true;
+}
+
+test "HTTP1 transfer encoding uses a case insensitive final coding" {
+    try std.testing.expect(hasChunkedEncoding("POST / HTTP/1.1\r\nTrAnSfEr-EnCoDiNg: gzip, CHUNKED\r\n"));
+    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n"));
+    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\n"));
+    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n"));
+}
+
+test "HTTP1 content length rejects invalid digits overflow and negative values" {
+    try std.testing.expectEqual(@as(usize, 0), try parseContentLength("GET / HTTP/1.1\r\nHost: test"));
+    try std.testing.expectEqual(@as(usize, 42), try parseContentLength("POST / HTTP/1.1\r\nCONTENT-LENGTH: \t42\t "));
+    for ([_][]const u8{ "-1", "1x", "", "184467440737095516160" }) |value| {
+        const headers = try std.fmt.allocPrint(std.testing.allocator, "POST / HTTP/1.1\r\nContent-Length: {s}", .{value});
+        defer std.testing.allocator.free(headers);
+        if (parseContentLength(headers)) |_| return error.AcceptedInvalidLength else |_| {}
+    }
+}
+
+fn chunkedAllocation(allocator: std.mem.Allocator) !void {
+    const decoded = try decodeChunkedBody(allocator, "3;ext=value\r\na\x00b\r\n2\r\ncd\r\n0\r\n\r\n");
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, "a\x00bcd", decoded);
+}
+
+test "HTTP1 chunked body decodes binary extensions and unwinds allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, chunkedAllocation, .{});
+    const empty = try decodeChunkedBody(std.testing.allocator, "0\r\n\r\n");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "HTTP1 malformed chunk suffix releases previously decoded chunks" {
+    for ([_][]const u8{ "1\r\nx\r\n", "1\r\nx\r\nZ\r\n", "1\r\nxZZ", "1\r\nx\r\n2\r\ny", "2000001\r\n" }) |body| {
+        if (decodeChunkedBody(std.testing.allocator, body)) |decoded| {
+            std.testing.allocator.free(decoded);
+            return error.AcceptedInvalidChunk;
+        } else |err| try std.testing.expect(err == error.InvalidChunkedBody or err == error.BodyTooLarge);
+    }
+}
+
+test "HTTP1 keepalive respects protocol and exact comma separated connection tokens" {
+    const Header = bridge_protocol.Header;
+    try std.testing.expect(requestKeepsAlive("HTTP/1.1", &.{}));
+    try std.testing.expect(!requestKeepsAlive("HTTP/1.0", &.{}));
+    for ([_][]const u8{ "close", "Keep-Alive, CLOSE", "\tclose " }) |value| {
+        try std.testing.expect(!requestKeepsAlive("HTTP/1.1", &.{Header{ .name = "Connection", .value = value }}));
+    }
+    try std.testing.expect(requestKeepsAlive("HTTP/1.0", &.{Header{ .name = "connection", .value = "upgrade, KEEP-ALIVE" }}));
+    try std.testing.expect(requestKeepsAlive("HTTP/1.1", &.{Header{ .name = "connection", .value = "disclose" }}));
+    try std.testing.expect(!requestKeepsAlive("HTTP/1.1", &.{Header{ .name = "connection", .value = " \t" }}));
+}
+
+test "HTTP1 upgrade requires both a protocol and an exact connection token" {
+    const upgrade: bridge_protocol.Header = .{ .name = "Upgrade", .value = "websocket" };
+    try std.testing.expect(!requestIsUpgrade(&.{upgrade}));
+    try std.testing.expect(!requestIsUpgrade(&.{ upgrade, .{ .name = "connection", .value = "xupgrade" } }));
+    try std.testing.expect(requestIsUpgrade(&.{ upgrade, .{ .name = "CONNECTION", .value = "keep-alive, Upgrade" } }));
+    try std.testing.expect(!requestIsUpgrade(&.{ .{ .name = "upgrade", .value = " \t" }, .{ .name = "connection", .value = "upgrade" } }));
+}
+
+test "HTTP1 response writer supplies framing without duplicating application headers" {
+    const c = @cImport({
+        @cInclude("sys/socket.h");
+        @cInclude("unistd.h");
+    });
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+    var connection: http1.Connection = .{ .fd = fds[0] };
+    defer connection.close();
+    defer _ = c.close(fds[1]);
+    try writeHttpResponse(std.testing.allocator, &connection, 201, &.{}, "a\x00b", true);
+    var buffer: [1024]u8 = undefined;
+    const count = (try http1.receiveTimeout(fds[1], &buffer, 1000)) orelse return error.NoResponse;
+    try std.testing.expectEqualStrings("HTTP/1.1 201 Created\r\ncontent-length: 3\r\nconnection: keep-alive\r\n\r\na\x00b", buffer[0..count]);
+    try writeHttpResponse(std.testing.allocator, &connection, 200, &.{ .{ .name = "Content-Length", .value = "1" }, .{ .name = "Connection", .value = "close" } }, "x", false);
+    const second = (try http1.receiveTimeout(fds[1], &buffer, 1000)) orelse return error.NoResponse;
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx", buffer[0..second]);
+    try writeUpgradeResponse(std.testing.allocator, &connection, 101, &.{.{ .name = "upgrade", .value = "websocket" }});
+    const upgraded = (try http1.receiveTimeout(fds[1], &buffer, 1000)) orelse return error.NoResponse;
+    try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\r\n", buffer[0..upgraded]);
+}
+
+fn rejectRequest(wire: []const u8, expected: anyerror) !void {
+    const c = @cImport({
+        @cInclude("sys/socket.h");
+        @cInclude("unistd.h");
+    });
+    const a = std.testing.allocator;
+    var queue = try @import("event_queue.zig").Queue.init(a, 4);
+    defer queue.deinit();
+    const Server = @import("proxy.zig").ProxyServer;
+    var server: Server = .{ .allocator = a, .queue = &queue, .pending = .init(a), .listener = .{ .fd = -1, .port = 0 }, .port = 0 };
+    defer server.pending.deinit();
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+    var connection: http1.Connection = .{ .fd = fds[0] };
+    defer connection.close();
+    defer _ = c.close(fds[1]);
+    try http1.sendAll(fds[1], wire);
+    http1.shutdownWrite(fds[1]);
+    try std.testing.expectError(expected, serveConnection(a, &server, &connection));
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+    try std.testing.expectEqual(@as(u32, 0), server.pending.count());
+}
+
+test "HTTP1 rejects malformed request lines and headers before Dart dispatch" {
+    try rejectRequest("bogus\r\n\r\n", error.InvalidRequest);
+    try rejectRequest("GET / NOTHTTP\r\n\r\n", error.InvalidRequest);
+    try rejectRequest("GET / HTTP/1.1\r\nmissing-colon\r\n\r\n", error.InvalidRequest);
+    try rejectRequest("POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n", error.InvalidContentLength);
+    try rejectRequest("POST / HTTP/1.1\r\nContent-Length: 33554433\r\n\r\n", error.BodyTooLarge);
+}
+
+test "HTTP1 rejects peer EOF in a declared body and oversized headers" {
+    try rejectRequest("POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nx", error.ConnectionClosed);
+    const wire = try std.testing.allocator.alloc(u8, max_header_bytes + 1);
+    defer std.testing.allocator.free(wire);
+    @memset(wire, 'x');
+    try rejectRequest(wire, error.HeadersTooLarge);
+}
+
+fn responseWriterAllocation(allocator: std.mem.Allocator) !void {
+    var connection: http1.Connection = .{ .fd = -1 };
+    writeHttpResponse(allocator, &connection, 200, &.{.{ .name = "x-one", .value = "value" }}, "body", false) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try std.testing.expectEqual(error.SendFailed, err);
+        return;
+    };
+    return error.UnexpectedWriteSuccess;
+}
+
+test "HTTP1 response construction releases allocations on OOM and socket failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, responseWriterAllocation, .{});
 }

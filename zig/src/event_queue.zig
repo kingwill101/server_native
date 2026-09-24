@@ -352,3 +352,53 @@ test "queue notifier catches registration race and coalesces pending work" {
     try queue.push(4, "detached");
     try std.testing.expectEqual(@as(usize, 2), probe.count);
 }
+
+test "queue notifier replacement observes pending work and rejected pushes do not wake" {
+    const Probe = struct {
+        count: usize = 0,
+        fn wake(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+        }
+    };
+    var queue = try Queue.init(std.testing.allocator, 1);
+    defer queue.deinit();
+    var one: Probe = .{};
+    var two: Probe = .{};
+    queue.setNotifier(&one, Probe.wake);
+    try std.testing.expectEqual(@as(usize, 0), one.count);
+    try queue.push(1, "one");
+    try std.testing.expectError(error.QueueFull, queue.push(2, "two"));
+    try std.testing.expectEqual(@as(usize, 1), one.count);
+    queue.setNotifier(&two, Probe.wake);
+    try std.testing.expectEqual(@as(usize, 1), two.count);
+    queue.release(queue.pop().?);
+    try queue.push(3, "three");
+    try std.testing.expectEqual(@as(usize, 1), one.count);
+    try std.testing.expectEqual(@as(usize, 2), two.count);
+}
+
+test "queue deterministic mixed operations match an independent FIFO model" {
+    var queue = try Queue.initWithByteLimit(std.testing.allocator, 7, 21);
+    defer queue.deinit();
+    var expected: std.ArrayList(i64) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    var rng = std.Random.DefaultPrng.init(0x5155455545);
+    for (0..1000) |i| {
+        if (rng.random().boolean()) {
+            const id: i64 = @intCast(i);
+            if (expected.items.len == 7) {
+                try std.testing.expectError(error.QueueFull, queue.push(id, "abc"));
+            } else {
+                try queue.push(id, "abc");
+                try expected.append(std.testing.allocator, id);
+            }
+        } else if (queue.pop()) |event| {
+            defer queue.release(event);
+            try std.testing.expectEqual(expected.orderedRemove(0), event.request_id);
+            try std.testing.expectEqualStrings("abc", event.payload);
+        } else try std.testing.expectEqual(@as(usize, 0), expected.items.len);
+        try std.testing.expectEqual(expected.items.len, queue.count());
+        try std.testing.expectEqual(expected.items.len * 3, queue.queuedBytes());
+    }
+}

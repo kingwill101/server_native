@@ -69,3 +69,11 @@ fn upper(comptime name: []const u8) []const u8 {
     inline for (name, 0..) |char, i| result[i] = std.ascii.toUpper(char);
     return &result;
 }
+
+test "protocol build macros match the C static-library contract" {
+    try std.testing.expect(comptime std.mem.eql(u8, "NGHTTP2", upper("nghttp2")));
+    try std.testing.expect(comptime std.mem.eql(u8, "NGTCP2", upper("ngtcp2")));
+    try std.testing.expect(comptime std.mem.eql(u8, "NGHTTP3", upper("nghttp3")));
+    // Discover the source manifest tests in this build-only test executable.
+    _ = sources;
+}

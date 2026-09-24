@@ -235,3 +235,94 @@ test "loads internal Zig modules" {
     std.testing.refAllDecls(bridge_protocol);
     std.testing.refAllDecls(event_queue);
 }
+
+test "FFI nullable lifecycle and response arguments fail without touching outputs" {
+    var port: u16 = 1234;
+    try std.testing.expect(server_native_zig_start_proxy_server(null, &port) == null);
+    try std.testing.expectEqual(@as(u16, 1234), port);
+    var config = std.mem.zeroes(abi.ServerNativeProxyConfig);
+    try std.testing.expect(server_native_zig_start_proxy_server(&config, null) == null);
+    server_native_zig_begin_shutdown(null);
+    try std.testing.expect(server_native_zig_shutdown_done(null));
+    server_native_zig_stop_proxy_server(null);
+    server_native_zig_set_event_port(null, 1);
+    server_native_zig_consume_request(null, 1, 100);
+    try std.testing.expectEqual(@as(u8, 0), server_native_zig_try_push_response(null, 1, "x", 1));
+    try std.testing.expectEqual(@as(u8, 0), server_native_zig_complete_direct_request(null, 1, null, 0));
+    try std.testing.expectEqual(@as(u8, 0), server_native_zig_poll_direct_request_frame(null, 0, null, null, null));
+    server_native_zig_free_direct_request_payload(null, 0);
+    server_native_zig_queue_destroy(null);
+}
+
+test "FFI queue rejects invalid capacity and malformed descriptors without queuing" {
+    try std.testing.expect(server_native_zig_queue_create(0) == null);
+    try std.testing.expect(server_native_zig_queue_create(257) == null);
+    const handle = server_native_zig_queue_create(1) orelse return error.OutOfMemory;
+    defer server_native_zig_queue_destroy(handle);
+    const malformed = [_]u8{255} ** 28;
+    try std.testing.expect(!server_native_zig_queue_push_request_start(handle, 1, &malformed, 27));
+    try std.testing.expect(!server_native_zig_queue_push_request_start(handle, 1, &malformed, malformed.len));
+    try std.testing.expectEqual(@as(usize, 0), server_native_zig_queue_length(handle));
+    try std.testing.expect(server_native_zig_queue_push(handle, 1, "x", 1));
+    try std.testing.expect(!server_native_zig_queue_push(handle, 2, "y", 1));
+    try std.testing.expectEqual(@as(usize, 1), server_native_zig_queue_length(handle));
+}
+
+test "FFI queue posts owned binary messages and preserves signed request IDs" {
+    const Post = struct {
+        var calls: usize = 0;
+        var valid = false;
+        fn send(port: c.Dart_Port_DL, message: [*c]c.Dart_CObject) callconv(.c) bool {
+            calls += 1;
+            if (port != 77 or message.*.type != c.Dart_CObject_kArray or message.*.value.as_array.length != 2) return false;
+            const values = message.*.value.as_array.values;
+            const id = values[0].*;
+            const data = values[1].*;
+            valid = id.type == c.Dart_CObject_kInt64 and id.value.as_int64 == -42 and
+                data.type == c.Dart_CObject_kTypedData and data.value.as_typed_data.type == c.Dart_TypedData_kUint8 and
+                data.value.as_typed_data.length == 3 and std.mem.eql(u8, data.value.as_typed_data.values[0..3], &.{ 0, 255, 17 });
+            return valid;
+        }
+    };
+    Post.calls = 0;
+    Post.valid = false;
+    const saved = c.Dart_PostCObject_DL;
+    c.Dart_PostCObject_DL = Post.send;
+    defer c.Dart_PostCObject_DL = saved;
+    const handle = server_native_zig_queue_create(2) orelse return error.OutOfMemory;
+    defer server_native_zig_queue_destroy(handle);
+    var payload = [_]u8{ 0, 255, 17 };
+    try std.testing.expect(server_native_zig_queue_push(handle, -42, &payload, payload.len));
+    @memset(&payload, 0);
+    try std.testing.expect(server_native_zig_queue_post_next(handle, 77));
+    try std.testing.expect(Post.valid);
+    try std.testing.expect(!server_native_zig_queue_post_next(handle, 77));
+    try std.testing.expectEqual(@as(usize, 1), Post.calls);
+    try std.testing.expectEqual(@as(usize, 0), server_native_zig_queue_length(handle));
+}
+
+test "FFI direct polling transfers payload ownership and leaves empty outputs untouched" {
+    var config = std.mem.zeroes(abi.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const handle = server_native_zig_start_proxy_server(&config, &port) orelse return error.StartFailed;
+    defer server_native_zig_stop_proxy_server(handle);
+    const server = proxy.fromHandle(handle);
+    const id: u64 = std.math.maxInt(u64);
+    try server.queue.push(@bitCast(id), "payload");
+    try std.testing.expectEqual(@as(u8, 0), server_native_zig_poll_direct_request_frame(handle, 0, null, null, null));
+    try std.testing.expectEqual(@as(usize, 1), server.queue.count());
+    var out_id: u64 = 0;
+    var payload: ?[*]u8 = null;
+    var length: u64 = 0;
+    try std.testing.expectEqual(@as(u8, 1), server_native_zig_poll_direct_request_frame(handle, 0, &out_id, &payload, &length));
+    defer server_native_zig_free_direct_request_payload(payload, length);
+    try std.testing.expectEqual(id, out_id);
+    try std.testing.expectEqualStrings("payload", payload.?[0..@intCast(length)]);
+    const original = payload;
+    try std.testing.expectEqual(@as(u8, 0), server_native_zig_poll_direct_request_frame(handle, 0, &out_id, &payload, &length));
+    try std.testing.expectEqual(original, payload);
+    try std.testing.expectEqual(id, out_id);
+    try std.testing.expectEqual(@as(u64, 7), length);
+    try std.testing.expect(server_native_zig_shutdown_done(handle));
+}

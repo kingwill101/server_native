@@ -17,3 +17,12 @@ test "internal protocol adapters" {
     _ = @import("http2.zig");
     _ = @import("http3.zig");
 }
+
+test "linked protocols reject unavailable ABI version requirements" {
+    try std.testing.expect(c.nghttp2_version(std.math.maxInt(c_int)) == null);
+    try std.testing.expect(c.ngtcp2_version(std.math.maxInt(c_int)) == null);
+    try std.testing.expect(c.nghttp3_version(std.math.maxInt(c_int)) == null);
+    try std.testing.expectEqual(c.NGHTTP2_VERSION_NUM, c.nghttp2_version(0).*.version_num);
+    try std.testing.expectEqual(c.NGTCP2_VERSION_NUM, c.ngtcp2_version(0).*.version_num);
+    try std.testing.expectEqual(c.NGHTTP3_VERSION_NUM, c.nghttp3_version(0).*.version_num);
+}

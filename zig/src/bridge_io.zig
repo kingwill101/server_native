@@ -141,3 +141,115 @@ fn readU32(frame: []const u8, offset: *usize) !u32 {
     offset.* += 4;
     return result;
 }
+
+// Fixed bytes are independent of the request encoder: this is the Dart response
+// wire contract, including one tokenized and one literal header and binary data.
+const test_response = [_]u8{ 1, 12, 0, 201, 0, 0, 0, 2, 0, 6, 0, 0, 0, 3, 'a', '/', 'b', 255, 255, 0, 0, 0, 3, 'x', '-', 'a', 0, 0, 0, 1, 'v', 0, 0, 0, 3, 0, 255, 42 };
+
+fn responseAllocation(allocator: std.mem.Allocator) !void {
+    var response: Response = .{};
+    defer response.deinit(allocator);
+    var done = false;
+    try decodeResponseFrame(allocator, &test_response, &response, &done);
+    try std.testing.expect(done and response.ready);
+    try std.testing.expectEqual(@as(u16, 201), response.status);
+    try std.testing.expectEqualStrings("content-type", response.headers.items[0].name);
+    try std.testing.expectEqualStrings("a/b", response.headers.items[0].value);
+    try std.testing.expectEqualStrings("x-a", response.headers.items[1].name);
+    try std.testing.expectEqualStrings("v", response.headers.items[1].value);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 42 }, response.body.items);
+}
+
+test "bridge response owns headers and binary body with allocation failure cleanup" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, responseAllocation, .{});
+    var input = test_response;
+    var response: Response = .{};
+    defer response.deinit(std.testing.allocator);
+    var done = false;
+    try decodeResponseFrame(std.testing.allocator, &input, &response, &done);
+    @memset(&input, 0);
+    try std.testing.expectEqualStrings("x-a", response.headers.items[1].name);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 42 }, response.body.items);
+}
+
+test "bridge response rejects every truncated prefix and trailing bytes" {
+    for (0..test_response.len) |length| {
+        var response: Response = .{};
+        defer response.deinit(std.testing.allocator);
+        var done = false;
+        if (decodeResponseFrame(std.testing.allocator, test_response[0..length], &response, &done)) |_| {
+            return error.AcceptedTruncatedResponse;
+        } else |err| try std.testing.expect(err == error.InvalidResponse or err == error.TruncatedResponse);
+        try std.testing.expect(!done);
+    }
+    var response: Response = .{};
+    defer response.deinit(std.testing.allocator);
+    var done = false;
+    try std.testing.expectError(error.InvalidResponse, decodeResponseFrame(std.testing.allocator, &(test_response ++ .{0}), &response, &done));
+}
+
+test "bridge response header count token and version are bounded" {
+    const cases = .{
+        .{ &[_]u8{ 2, 8 }, error.InvalidResponse },
+        .{ &[_]u8{ 1, 99 }, error.InvalidResponse },
+        .{ &[_]u8{ 1, 8, 0 }, error.InvalidResponse },
+        .{ &[_]u8{ 1, 14, 0, 200, 0, 1, 0, 1 }, error.TooManyHeaders },
+        .{ &[_]u8{ 1, 14, 0, 200, 0, 0, 0, 1, 0, 29 }, error.InvalidHeaderToken },
+        .{ &[_]u8{ 1, 7, 255, 255, 255, 255 }, error.TruncatedResponse },
+    };
+    inline for (cases) |case| {
+        var response: Response = .{};
+        defer response.deinit(std.testing.allocator);
+        var done = false;
+        try std.testing.expectError(case[1], decodeResponseFrame(std.testing.allocator, case[0], &response, &done));
+        try std.testing.expect(!done);
+    }
+}
+
+test "bridge progressive response distinguishes headers chunks and terminal" {
+    var response: Response = .{};
+    defer response.deinit(std.testing.allocator);
+    var done = false;
+    try decodeResponseFrame(std.testing.allocator, &.{ 1, 14, 0, 200, 0, 0, 0, 0 }, &response, &done);
+    try std.testing.expect(response.ready and !done);
+    for ([_][]const u8{ &.{ 1, 7, 0, 0, 0, 0 }, &.{ 1, 7, 0, 0, 0, 2, 'a', 'b' }, &.{ 1, 7, 0, 0, 0, 1, 'c' } }) |frame| {
+        try decodeResponseFrame(std.testing.allocator, frame, &response, &done);
+        try std.testing.expect(!done);
+    }
+    try decodeResponseFrame(std.testing.allocator, &.{ 1, 8 }, &response, &done);
+    try std.testing.expect(done);
+    try std.testing.expectEqualStrings("abc", response.body.items);
+}
+
+test "bridge wire IO preserves consecutive empty and binary frames" {
+    const c = @cImport({
+        @cInclude("sys/socket.h");
+        @cInclude("unistd.h");
+    });
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    for ([_][]const u8{ "", &.{ 0, 255, 128 }, "last" }) |payload| {
+        try sendFrame(std.testing.allocator, fds[0], payload);
+        const received = try receiveFrame(std.testing.allocator, fds[1]);
+        defer std.testing.allocator.free(received);
+        try std.testing.expectEqualSlices(u8, payload, received);
+    }
+}
+
+test "bridge wire IO rejects truncated prefix payload and oversized lengths" {
+    const c = @cImport({
+        @cInclude("sys/socket.h");
+        @cInclude("unistd.h");
+    });
+    for ([_][]const u8{ "", &.{0}, &.{ 0, 0, 0 }, &.{ 0, 0, 0, 3, 42 }, &.{ 4, 0, 0, 1 } }, 0..) |wire, i| {
+        var fds: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+        defer _ = c.close(fds[0]);
+        defer _ = c.close(fds[1]);
+        try http1.sendAll(fds[0], wire);
+        http1.shutdownWrite(fds[0]);
+        try std.testing.expectError(if (i == 4) error.FrameTooLarge else error.ConnectionClosed, receiveFrame(std.testing.allocator, fds[1]));
+    }
+}

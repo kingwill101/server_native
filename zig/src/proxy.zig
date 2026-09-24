@@ -501,3 +501,61 @@ test "upload credit follows consumption and survives queue reservation rollback"
     server.consumeRequestBytes(1, 65536);
     try std.testing.expectEqual(@as(usize, 0), server.takeRequestCredit(1));
 }
+
+test "proxy rejects invalid configuration without modifying the output port" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    var port: u16 = 42;
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    config.host = "";
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    config.host = "127.0.0.1";
+    config.backend_kind = 2;
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    config.backend_kind = 0;
+    config.tls_cert_path = "missing";
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    config.tls_cert_path = null;
+    config.tls_key_path = "missing";
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    try std.testing.expectEqual(@as(u16, 42), port);
+}
+
+test "proxy request admission limit recovers after cancellation and preserves peer queues" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const server = ProxyServer.create(&config, &port) orelse return error.StartFailed;
+    defer server.stop();
+    for (0..4096) |id| try std.testing.expect(server.registerRequest(id));
+    try std.testing.expect(!server.registerRequest(4096));
+    try std.testing.expect(server.pushResponse(1, "peer", 4));
+    server.discardRequest(0);
+    server.discardRequest(0);
+    try std.testing.expect(server.registerRequest(4096));
+    try std.testing.expect(!server.registerRequest(4097));
+    const frame = server.takeResponse(1).?;
+    defer server.allocator.free(frame);
+    try std.testing.expectEqualStrings("peer", frame);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_bytes);
+}
+
+test "proxy response copies input and upload consumption clamps duplicate credit" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const server = ProxyServer.create(&config, &port) orelse return error.StartFailed;
+    defer server.stop();
+    try std.testing.expect(server.registerRequest(1));
+    var input = [_]u8{ 0, 255, 42 };
+    try std.testing.expect(server.pushResponse(1, &input, input.len));
+    @memset(&input, 0);
+    const frame = server.takeResponse(1).?;
+    defer server.allocator.free(frame);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 42 }, frame);
+    try std.testing.expect(server.reserveRequestBytes(1, 123));
+    server.consumeRequestBytes(1, 999);
+    server.consumeRequestBytes(1, 999);
+    try std.testing.expectEqual(@as(usize, 123), server.takeRequestCredit(1));
+    try std.testing.expectEqual(@as(usize, 0), server.takeRequestCredit(1));
+    try std.testing.expect(server.reserveRequestBytes(1, 65536));
+}

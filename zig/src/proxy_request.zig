@@ -364,3 +364,54 @@ test "bridge cancellation completes a partial frame before its terminal" {
     var extra: [1]u8 = undefined;
     try std.testing.expect((try http1.receiveTimeout(fds[1], &extra, 0)) == null);
 }
+
+fn advertiseAllocation(allocator: std.mem.Allocator) !void {
+    var response: bridge_io.Response = .{};
+    defer response.deinit(allocator);
+    var server = .{ .http3 = @as(?u8, 1), .port = @as(u16, 65535) };
+    try advertiseHttp3(allocator, &server, &response);
+    try std.testing.expectEqualStrings("h3=\":65535\"; ma=86400", response.headers.items[0].value);
+}
+
+test "Alt-Svc allocation failures release both header fields" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, advertiseAllocation, .{});
+}
+
+test "Alt-Svc preserves a mixed case application override" {
+    const a = std.testing.allocator;
+    var response: bridge_io.Response = .{};
+    defer response.deinit(a);
+    const name = try a.dupe(u8, "Alt-SvC");
+    const value = try a.dupe(u8, "clear");
+    try response.headers.append(a, .{ .name = name, .value = value });
+    var server = .{ .http3 = @as(?u8, 1), .port = @as(u16, 443) };
+    try advertiseHttp3(a, &server, &response);
+    try std.testing.expectEqual(@as(usize, 1), response.headers.items.len);
+    try std.testing.expectEqualStrings("clear", response.headers.items[0].value);
+}
+
+test "request head defaults and query splitting preserve encoded delimiters" {
+    var request: Request = .{ .allocator = std.testing.allocator };
+    var head = requestHead(&request);
+    try std.testing.expectEqualStrings("/", head.path);
+    try std.testing.expectEqualStrings("https", head.scheme);
+    try std.testing.expectEqualStrings("", head.query);
+    request.path = try std.testing.allocator.dupe(u8, "/a%3Fb?x=?&empty=");
+    defer std.testing.allocator.free(request.path);
+    head = requestHead(&request);
+    try std.testing.expectEqualStrings("/a%3Fb", head.path);
+    try std.testing.expectEqualStrings("x=?&empty=", head.query);
+}
+
+test "cancellation before dispatch and after request EOF never produces a terminal" {
+    var queue = try @import("event_queue.zig").Queue.init(std.testing.allocator, 1);
+    defer queue.deinit();
+    var server = .{ .queue = &queue };
+    var request: Request = .{ .allocator = std.testing.allocator };
+    try std.testing.expect(try finishCancelledRequest(&server, &request));
+    request.request_id = 1;
+    try std.testing.expect(try finishCancelledRequest(&server, &request));
+    request.direct_stage = .waiting;
+    try std.testing.expect(try finishCancelledRequest(&server, &request));
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+}

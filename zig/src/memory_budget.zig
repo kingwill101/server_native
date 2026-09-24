@@ -125,3 +125,53 @@ test "budgeted C realloc failure preserves data and metadata is charged" {
     try std.testing.expect(Budget.cMalloc(std.math.maxInt(usize), &budget) == null);
     Budget.cFree(null, &budget);
 }
+
+test "budget resize and remap charge exact growth and restore shrink capacity" {
+    var storage: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var budget: Budget = .{ .parent = fixed.allocator(), .limit = 64 };
+    const a = budget.allocator();
+    var bytes = try a.alloc(u8, 16);
+    @memset(bytes, 42);
+    try std.testing.expect(a.resize(bytes, 48));
+    bytes = bytes.ptr[0..48];
+    try std.testing.expectEqual(@as(usize, 48), budget.used);
+    try std.testing.expect(!a.resize(bytes, 65));
+    try std.testing.expectEqual(@as(usize, 48), budget.used);
+    bytes = a.remap(bytes, 24) orelse return error.RemapFailed;
+    try std.testing.expectEqual(@as(usize, 24), budget.used);
+    bytes = a.remap(bytes, 64) orelse return error.RemapFailed;
+    try std.testing.expectEqual(@as(usize, 64), budget.used);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(42))), bytes[0..16]);
+    try std.testing.expect(a.remap(bytes, 65) == null);
+    a.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+    try std.testing.expectEqual(@as(usize, 64), budget.peak);
+}
+
+test "budget parent exhaustion rolls back allocation resize and remap accounting" {
+    var storage: [32]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var budget: Budget = .{ .parent = fixed.allocator(), .limit = 256 };
+    const a = budget.allocator();
+    const bytes = try a.alloc(u8, 24);
+    defer a.free(bytes);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 9));
+    try std.testing.expect(!a.resize(bytes, 33));
+    try std.testing.expect(a.remap(bytes, 33) == null);
+    try std.testing.expectEqual(@as(usize, 24), budget.used);
+}
+
+test "budget C allocation alignment shrink preservation and zero realloc release" {
+    var budget: Budget = .{ .parent = std.testing.allocator, .limit = 256 };
+    const first = Budget.cRealloc(null, 40, &budget) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(first) % 16);
+    @memset(@as([*]u8, @ptrCast(first))[0..40], 0x7b);
+    const small = Budget.cRealloc(first, 3, &budget) orelse return error.OutOfMemory;
+    try std.testing.expectEqualSlices(u8, &.{ 0x7b, 0x7b, 0x7b }, @as([*]u8, @ptrCast(small))[0..3]);
+    try std.testing.expect(Budget.cRealloc(small, 0, &budget) == null);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+    const empty = Budget.cCalloc(0, std.math.maxInt(usize), &budget) orelse return error.OutOfMemory;
+    Budget.cFree(empty, &budget);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+}

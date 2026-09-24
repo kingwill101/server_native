@@ -45,6 +45,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run Zig unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Build adapters execute on the host even when the native asset is targeted
+    // elsewhere. Keep source-manifest validation in the normal test gate.
+    const build_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("protocol_dependencies.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(build_tests).step);
+
     const static_test_module = b.createModule(.{
         .root_source_file = b.path("src/static_link_test.zig"),
         .target = target,

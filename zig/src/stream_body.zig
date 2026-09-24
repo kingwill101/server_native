@@ -73,3 +73,51 @@ test "QUIC body cancellation frees both offered and pending chunks" {
     try body.acknowledge(a, 3);
     try std.testing.expectEqual(@as(usize, 11), body.bytes);
 }
+
+fn bodyAllocation(allocator: std.mem.Allocator) !void {
+    var body: Body = .{};
+    defer body.deinit(allocator);
+    for (0..40) |i| {
+        const bytes = try allocator.alloc(u8, i + 1);
+        errdefer allocator.free(bytes);
+        @memset(bytes, @intCast(i));
+        try body.append(allocator, bytes);
+    }
+    for (0..40) |i| {
+        const bytes = body.next().?;
+        try std.testing.expectEqual(i + 1, bytes.len);
+        for (bytes) |byte| try std.testing.expectEqual(@as(u8, @intCast(i)), byte);
+        try body.acknowledge(allocator, bytes.len);
+    }
+    try std.testing.expectEqual(@as(usize, 0), body.bytes);
+}
+
+test "QUIC body append ownership survives every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, bodyAllocation, .{});
+}
+
+test "QUIC body rejects acknowledging unoffered bytes without consuming them" {
+    const a = std.testing.allocator;
+    var body: Body = .{};
+    defer body.deinit(a);
+    try body.append(a, try a.dupe(u8, "pending"));
+    try std.testing.expectError(error.InvalidAcknowledgement, body.acknowledge(a, 1));
+    try std.testing.expectEqual(@as(usize, 7), body.bytes);
+    try body.acknowledge(a, 0);
+    try std.testing.expectEqualStrings("pending", body.next().?);
+    try body.acknowledge(a, 7);
+    try std.testing.expect(body.next() == null);
+}
+
+test "QUIC body empty chunks do not block subsequent acknowledged data" {
+    const a = std.testing.allocator;
+    var body: Body = .{};
+    defer body.deinit(a);
+    try body.append(a, try a.alloc(u8, 0));
+    try body.append(a, try a.dupe(u8, "x"));
+    try std.testing.expectEqual(@as(usize, 0), body.next().?.len);
+    try std.testing.expectEqualStrings("x", body.next().?);
+    try body.acknowledge(a, 1);
+    try std.testing.expectEqual(@as(usize, 0), body.chunks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), body.bytes);
+}

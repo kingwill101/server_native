@@ -1004,3 +1004,55 @@ test "UDP registry mutex serializes native callers" {
     for (threads) |thread| thread.join();
     try std.testing.expectEqual(@as(usize, 4000), counter.value);
 }
+
+test "QUIC peer address identity includes IPv6 scope and ignores flow labels" {
+    var first = std.mem.zeroes(c.sockaddr_storage);
+    var second = std.mem.zeroes(c.sockaddr_storage);
+    const a: *c.sockaddr_in6 = @ptrCast(@alignCast(&first));
+    const b: *c.sockaddr_in6 = @ptrCast(@alignCast(&second));
+    a.sin6_family = c.AF_INET6;
+    a.sin6_port = 443;
+    a.sin6_scope_id = 2;
+    @memset(std.mem.asBytes(&a.sin6_addr), 0x12);
+    b.* = a.*;
+    b.sin6_flowinfo = 999;
+    try std.testing.expect(sameAddress(&first, &second));
+    b.sin6_scope_id = 3;
+    try std.testing.expect(!sameAddress(&first, &second));
+    b.* = a.*;
+    b.sin6_port += 1;
+    try std.testing.expect(!sameAddress(&first, &second));
+    b.* = a.*;
+    std.mem.asBytes(&b.sin6_addr)[15] ^= 1;
+    try std.testing.expect(!sameAddress(&first, &second));
+    b.* = a.*;
+    b.sin6_family = c.AF_INET;
+    try std.testing.expect(!sameAddress(&first, &second));
+    first.ss_family = c.AF_UNSPEC;
+    second.ss_family = c.AF_UNSPEC;
+    try std.testing.expect(!sameAddress(&first, &second));
+}
+
+test "QUIC long header routing extracts exact destination and source IDs" {
+    const packet = [_]u8{ 0xc0, 0, 0, 0, 1, 4, 'd', 'e', 's', 't', 3, 's', 'r', 'c' };
+    for (0..packet.len) |length| try std.testing.expect(packetVersion(packet[0..length]) == null);
+    const version = packetVersion(&packet).?;
+    try std.testing.expectEqual(@as(u32, 1), version.version);
+    try std.testing.expectEqualStrings("dest", version.dcid[0..version.dcidlen]);
+    try std.testing.expectEqualStrings("src", version.scid[0..version.scidlen]);
+}
+
+test "QUIC zero PTO still has bounded retention and zero replies spend no budget" {
+    var state: Termination = .{};
+    try std.testing.expect(!state.reply(0, 10, 3));
+    state.begin(10, 0, false);
+    try std.testing.expectEqual(@as(u64, 13), state.deadline);
+    try std.testing.expect(!state.reply(10, 100, 0));
+    try std.testing.expectEqual(@as(u64, 0), state.received_bytes);
+    try std.testing.expect(state.reply(10, 1, 3));
+    try std.testing.expect(!state.reply(11, 1, 3));
+    try std.testing.expect(state.reply(12, 1, 3));
+    try std.testing.expect(!state.reply(13, 1000, 3));
+    state.begin(100, 100, true);
+    try std.testing.expectEqual(@as(u64, 13), state.deadline);
+}

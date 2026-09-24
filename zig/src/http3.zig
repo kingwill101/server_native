@@ -528,3 +528,51 @@ test "HTTP3 native allocations honor budget and failed initialization releases c
     connection.deinit();
     try std.testing.expectEqual(@as(usize, 0), budget.used);
 }
+
+test "HTTP3 duplicate SETTINGS poisons subsequent operations" {
+    var callbacks = std.mem.zeroes(c.nghttp3_callbacks);
+    var conn = try Connection.initServer(&callbacks, null);
+    defer conn.deinit();
+    try conn.bindStreams(3, 7, 11);
+    // Client control stream type, SETTINGS frame type, empty payload length.
+    try std.testing.expectEqual(@as(usize, 3), try conn.receive(2, &.{ 0, 4, 0 }, false, 0));
+    try std.testing.expectError(error.NativeFailure, conn.receive(2, &.{ 4, 0 }, false, 1));
+    try std.testing.expect(conn.failed and conn.last_error != 0);
+    var vectors: [1]c.nghttp3_vec = undefined;
+    try std.testing.expectError(error.Closed, conn.output(&vectors));
+    try std.testing.expectError(error.Closed, conn.receive(6, "", false, 2));
+    try std.testing.expectError(error.Closed, conn.wrote(3, 0));
+    try std.testing.expectError(error.Closed, conn.acknowledged(3, 0));
+}
+
+test "HTTP3 TLS failure permits a fresh certificate load on the same context" {
+    var context = try TlsContext.initServer();
+    defer context.deinit();
+    try std.testing.expectError(error.NativeFailure, context.certificate("", ""));
+    try context.certificate("src/testdata/tls-cert.pem", "src/testdata/tls-key.pem");
+    var config = QuicConfig.init(1);
+    var buffer: [256]u8 = undefined;
+    var session = try context.session(try config.encode(&buffer));
+    defer session.deinit();
+    try std.testing.expect(session.native != null);
+}
+
+test "HTTP3 control output is reoffered until QUIC accepts its bytes" {
+    var callbacks = std.mem.zeroes(c.nghttp3_callbacks);
+    var conn = try Connection.initServer(&callbacks, null);
+    defer conn.deinit();
+    try conn.bindStreams(3, 7, 11);
+    var vectors: [8]c.nghttp3_vec = undefined;
+    const first = try conn.output(&vectors);
+    try std.testing.expect(first.vectors.len > 0);
+    const stream = first.stream;
+    const bytes = try std.testing.allocator.dupe(u8, first.vectors[0].base[0..first.vectors[0].len]);
+    defer std.testing.allocator.free(bytes);
+    const again = try conn.output(&vectors);
+    try std.testing.expectEqual(stream, again.stream);
+    try std.testing.expectEqualSlices(u8, bytes, again.vectors[0].base[0..again.vectors[0].len]);
+    try conn.wrote(stream, 1);
+    const partial = try conn.output(&vectors);
+    try std.testing.expectEqual(stream, partial.stream);
+    try std.testing.expectEqualSlices(u8, bytes[1..], partial.vectors[0].base[0..partial.vectors[0].len]);
+}

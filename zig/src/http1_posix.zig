@@ -318,3 +318,99 @@ pub fn sendNonblocking(fd: Fd, bytes: []const u8) !?usize {
     if (result == 0) return error.SendFailed;
     return @intCast(result);
 }
+
+test "TCP listener binds an ephemeral port and supports half-close response traffic" {
+    var listener = try listen(std.testing.allocator, "127.0.0.1", 0, 8, false, false);
+    defer listener.close();
+    try std.testing.expect(listener.port != 0);
+    var client = try connectTcp(std.testing.allocator, "127.0.0.1", listener.port);
+    defer client.close();
+    var peer = try accept(listener.fd);
+    defer peer.close();
+    var buffer: [16]u8 = undefined;
+    try std.testing.expect((try receiveTimeoutConnection(&peer, &buffer, 0)) == null);
+    try sendAllConnection(&client, "request");
+    shutdownWrite(client.fd);
+    const count = (try receiveTimeoutConnection(&peer, &buffer, 1000)) orelse return error.NoRequest;
+    try std.testing.expectEqualStrings("request", buffer[0..count]);
+    try std.testing.expectEqual(@as(?usize, 0), try receiveTimeoutConnection(&peer, &buffer, 1000));
+    try sendAllConnection(&peer, "reply");
+    const reply = (try receiveTimeoutConnection(&client, &buffer, 1000)) orelse return error.NoReply;
+    try std.testing.expectEqualStrings("reply", buffer[0..reply]);
+    peer.close();
+    peer.close();
+    try std.testing.expectEqual(@as(Fd, -1), peer.fd);
+    listener.close();
+    listener.close();
+    try std.testing.expectEqual(@as(Fd, -1), listener.fd);
+}
+
+test "TCP reserved PRI prefix detection does not consume input" {
+    for ([_][]const u8{ "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "GET / HTTP/1.1\r\n" }, 0..) |wire, index| {
+        var fds: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+        var peer: Connection = .{ .fd = fds[0] };
+        defer peer.close();
+        defer _ = c.close(fds[1]);
+        try sendAll(fds[1], wire);
+        try std.testing.expectEqual(index == 0, peer.hasHttp2Preface());
+        try std.testing.expect(!peer.isH2());
+        var buffer: [64]u8 = undefined;
+        const count = try receiveConnection(&peer, &buffer);
+        try std.testing.expectEqualStrings(wire, buffer[0..count]);
+    }
+}
+
+test "socket nonblocking writes report pressure and resume after peer drains" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    var size: c_int = 4096;
+    try std.testing.expectEqual(@as(c_int, 0), c.setsockopt(fds[0], c.SOL_SOCKET, c.SO_SNDBUF, &size, @sizeOf(c_int)));
+    const bytes: [4096]u8 = @splat(0x5a);
+    var sent: usize = 0;
+    var blocked = false;
+    for (0..1024) |_| {
+        const count = (try sendNonblocking(fds[0], &bytes)) orelse {
+            blocked = true;
+            break;
+        };
+        sent += count;
+    }
+    try std.testing.expect(blocked and sent > 0);
+    var buffer: [4096]u8 = undefined;
+    var received: usize = 0;
+    while (received < sent) {
+        const count = (try receiveTimeout(fds[1], &buffer, 1000)) orelse return error.DrainTimeout;
+        try std.testing.expect(count != 0);
+        try std.testing.expectEqualSlices(u8, bytes[0..count], buffer[0..count]);
+        received += count;
+    }
+    try std.testing.expectEqual(@as(?usize, 1), try sendNonblocking(fds[0], "x"));
+}
+
+test "socket invalid descriptors and excessive Unix paths fail explicitly" {
+    var buffer: [1]u8 = undefined;
+    try std.testing.expectError(error.AcceptFailed, accept(-1));
+    try std.testing.expectError(error.ReceiveFailed, receive(-1, &buffer));
+    try std.testing.expectError(error.SendFailed, sendAll(-1, "x"));
+    try std.testing.expectError(error.SendFailed, sendNonblocking(-1, "x"));
+    try std.testing.expectError(error.AddressQueryFailed, boundPort(-1, c.AF_INET));
+    try std.testing.expectError(error.BackendPathTooLong, connectUnix(&(@as([108]u8, @splat('x')))));
+    try std.testing.expectError(error.BackendConnectFailed, connectUnix(""));
+}
+
+test "HTTP1 TLS ALPN chooses h2 from an offer and rejects malformed lengths" {
+    var selected: [*c]const u8 = null;
+    var length: u8 = 0;
+    const protocols = "\x08http/1.1\x02h2";
+    try std.testing.expectEqual(c.SSL_TLSEXT_ERR_OK, TlsContext.selectAlpn(null, &selected, &length, protocols, protocols.len, null));
+    try std.testing.expectEqualStrings("h2", selected[0..length]);
+    for ([_][]const u8{ "\x00", "\x03h2" }) |invalid| {
+        try std.testing.expectEqual(c.SSL_TLSEXT_ERR_ALERT_FATAL, TlsContext.selectAlpn(null, &selected, &length, invalid.ptr, @intCast(invalid.len), null));
+    }
+    const http11 = "\x08http/1.1";
+    try std.testing.expectEqual(c.SSL_TLSEXT_ERR_NOACK, TlsContext.selectAlpn(null, &selected, &length, http11, http11.len, null));
+    try std.testing.expectError(error.TlsCertificateFailed, TlsContext.init("", "", true));
+}

@@ -93,7 +93,9 @@ owning values must not be copied or shared concurrently between threads.
 
 ## Tests
 
-Run `zig build test`. The suite covers the cases below on Linux x86_64.
+Run `zig build test`. See [TESTING.md](TESTING.md) for the file-by-file coverage
+inventory and Debug/ReleaseSafe commands. The suite covers the cases below on
+Linux x86_64.
 `zig build test install` also verifies both library outputs. Coverage includes:
 
 - Pinned library versions.

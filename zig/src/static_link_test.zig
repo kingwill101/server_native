@@ -20,3 +20,21 @@ test "static asset contains the runtime, protocols, and QUIC TLS adapter" {
     defer SSL_CTX_free(context);
     try std.testing.expectEqual(@as(c_int, 0), ngtcp2_crypto_boringssl_configure_server_context(context));
 }
+
+extern fn server_native_zig_queue_create(usize) ?*anyopaque;
+extern fn server_native_zig_queue_destroy(?*anyopaque) void;
+extern fn server_native_zig_queue_push(*anyopaque, i64, [*]const u8, usize) bool;
+extern fn server_native_zig_queue_length(*anyopaque) usize;
+extern fn server_native_zig_queue_post_next(*anyopaque, i64) bool;
+
+test "static asset queue ABI owns data and links API-DL symbols without a Dart VM" {
+    try std.testing.expect(server_native_zig_queue_create(0) == null);
+    const queue = server_native_zig_queue_create(1) orelse return error.OutOfMemory;
+    defer server_native_zig_queue_destroy(queue);
+    try std.testing.expect(server_native_zig_queue_push(queue, -1, "binary\x00", 7));
+    try std.testing.expect(!server_native_zig_queue_push(queue, 2, "full", 4));
+    try std.testing.expectEqual(@as(usize, 1), server_native_zig_queue_length(queue));
+    // API-DL has not been initialized: posting fails safely and frees the event.
+    try std.testing.expect(!server_native_zig_queue_post_next(queue, 1));
+    try std.testing.expectEqual(@as(usize, 0), server_native_zig_queue_length(queue));
+}
