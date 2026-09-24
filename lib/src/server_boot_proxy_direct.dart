@@ -423,8 +423,10 @@ NativeProxyServer _startNativeDirectProxy({
   final proxy = NativeProxyServer.start(
     host: host,
     port: port,
-    backendHost: InternetAddress.loopbackIPv4.address,
-    backendPort: 9,
+    // Direct queue mode does not use a Dart bridge socket. Keep the backend
+    // endpoint empty so Zig can distinguish it from bridge mode.
+    backendHost: '',
+    backendPort: 0,
     backlog: backlog,
     v6Only: v6Only,
     shared: shared,

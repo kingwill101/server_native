@@ -16,7 +16,7 @@ void main() {
     });
 
     test('exports the current Zig transport version', () {
-      expect(server_native_transport_version(), 1);
+      expect(server_native_zig_transport_version(), 1);
     });
 
     test('posts a native integer to a Dart ReceivePort', () async {

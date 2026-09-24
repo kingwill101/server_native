@@ -113,7 +113,6 @@ pub fn frameType(payload: []const u8) Error!FrameType {
     };
 }
 
-
 pub const Header = struct {
     name: []const u8,
     value: []const u8,
@@ -190,13 +189,23 @@ pub fn encodeRequestStart(request: RequestHead, out: []u8) Error![]const u8 {
 /// Returns the exact encoded size without allocating an output buffer.
 pub fn requestStartEncodedSize(request: RequestHead) Error!usize {
     var writer = Writer{ .bytes = null };
-    try writeRequestStart(request, &writer);
+    try writeRequestFrame(request, &writer, .request_start_tokenized, null);
     return writer.offset;
 }
 
+pub fn encodeRequest(request: RequestHead, body: []const u8, out: []u8) Error![]const u8 {
+    var writer = Writer{ .bytes = out };
+    try writeRequestFrame(request, &writer, .request_tokenized, body);
+    return out[0..writer.offset];
+}
+
 fn writeRequestStart(request: RequestHead, writer: *Writer) Error!void {
+    try writeRequestFrame(request, writer, .request_start_tokenized, null);
+}
+
+fn writeRequestFrame(request: RequestHead, writer: *Writer, frame_type: FrameType, body: ?[]const u8) Error!void {
     try writer.putU8(protocol_version);
-    try writer.putU8(@intFromEnum(FrameType.request_start_tokenized));
+    try writer.putU8(@intFromEnum(frame_type));
     try writer.putBytes(request.method);
     try writer.putBytes(request.scheme);
     try writer.putBytes(request.authority);
@@ -258,6 +267,7 @@ fn writeRequestStart(request: RequestHead, writer: *Writer) Error!void {
     }
 
     writer.patchU32(count_position, header_count);
+    if (body) |bytes| try writer.putBytes(bytes);
     if (writer.offset > max_frame_bytes) return error.FrameTooLarge;
 }
 
@@ -578,4 +588,107 @@ fn expectEncodedField(
 
 fn readU16(input: []const u8) u16 {
     return (@as(u16, input[0]) << 8) | @as(u16, input[1]);
+}
+
+test "wire frames round trip deterministic binary payloads and reject truncation" {
+    var rng = std.Random.DefaultPrng.init(0x5e7e2026);
+    var payload: [2048]u8 = undefined;
+    var output: [2052]u8 = undefined;
+    for (0..100) |_| {
+        const len = rng.random().uintLessThan(usize, payload.len + 1);
+        rng.random().bytes(payload[0..len]);
+        const encoded = try encodeWireFrame(payload[0..len], &output);
+        try std.testing.expectEqualSlices(u8, payload[0..len], try decodeWireFrame(encoded));
+        if (len > 0) try std.testing.expectError(error.InvalidLength, decodeWireFrame(encoded[0 .. encoded.len - 1]));
+        try std.testing.expectError(error.BufferTooSmall, encodeWireFrame(payload[0..len], output[0 .. encoded.len - 1]));
+    }
+}
+
+test "chunk frame types round trip binary and empty bodies" {
+    const kinds = [_]FrameType{ .request_chunk, .response_chunk, .tunnel_chunk };
+    var output: [256]u8 = undefined;
+    const data = [_]u8{ 0, 255, 1, 128, 13, 10 };
+    for (kinds) |kind| {
+        for ([_][]const u8{ "", &data }) |bytes| {
+            const encoded = try encodeChunk(kind, bytes, &output);
+            try std.testing.expectEqualSlices(u8, bytes, try decodeChunk(encoded, kind));
+            try std.testing.expectEqual(kind, try frameType(encoded));
+            try std.testing.expectError(error.BufferTooSmall, encodeChunk(kind, bytes, output[0 .. encoded.len - 1]));
+        }
+    }
+}
+
+test "frame type decoder covers every tag and rejects unknown tags" {
+    for (0..256) |tag| {
+        const bytes = [_]u8{ protocol_version, @intCast(tag) };
+        if (tag >= 1 and tag <= 14) {
+            try std.testing.expectEqual(@as(u8, @intCast(tag)), @intFromEnum(try frameType(&bytes)));
+        } else try std.testing.expectError(error.UnexpectedFrameType, frameType(&bytes));
+    }
+    for ([_][]const u8{ "", &.{protocol_version} }) |bytes|
+        try std.testing.expectError(error.TruncatedPayload, frameType(bytes));
+}
+
+test "chunk decoder rejects forged lengths versions and trailing bytes" {
+    try std.testing.expectError(error.InvalidLength, decodeChunk(&.{ 1, 4, 0, 0, 0, 1 }, .request_chunk));
+    try std.testing.expectError(error.InvalidLength, decodeChunk(&.{ 1, 4, 0, 0, 0, 0, 7 }, .request_chunk));
+    try std.testing.expectError(error.UnsupportedVersion, decodeChunk(&.{ 9, 4, 0, 0, 0, 0 }, .request_chunk));
+    try std.testing.expectError(error.FrameTooLarge, decodeWireFrame(&.{ 255, 255, 255, 255 }));
+}
+
+const test_descriptor = [_]u8{
+    0,   0,   0, 3, 'G', 'E', 'T', 0, 0, 0, 4,   'h', 't', 't', 'p', 0,   0,   0,   0,
+    0,   0,   0, 1, '/', 0,   0,   0, 0, 0, 0,   0,   8,   'H', 'T', 'T', 'P', '/', '1',
+    '.', '1', 0, 0, 0,   1,   0,   0, 0, 1, 'x', 0,   0,   0,   1,   'y',
+};
+
+test "request descriptor rejects every truncated prefix" {
+    for (0..test_descriptor.len) |len| {
+        const result = decodeRequestHeadDescriptor(std.testing.allocator, test_descriptor[0..len]);
+        if (result) |head| {
+            std.testing.allocator.free(head.headers);
+            return error.AcceptedTruncatedDescriptor;
+        } else |err| try std.testing.expect(err == error.TruncatedPayload or err == error.InvalidLength);
+    }
+    const head = try decodeRequestHeadDescriptor(std.testing.allocator, &test_descriptor);
+    defer std.testing.allocator.free(head.headers);
+    try std.testing.expectEqualStrings("GET", head.method);
+    try std.testing.expectEqualStrings("/", head.path);
+    try std.testing.expectEqualStrings("y", head.headers[0].value);
+}
+
+fn descriptorAllocation(allocator: std.mem.Allocator) !void {
+    const head = try decodeRequestHeadDescriptor(allocator, &test_descriptor);
+    defer allocator.free(head.headers);
+    const size = try requestStartEncodedSize(head);
+    const out = try allocator.alloc(u8, size);
+    defer allocator.free(out);
+    try std.testing.expectEqual(size, (try encodeRequestStart(head, out)).len);
+}
+
+test "request descriptor and tokenized output unwind allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, descriptorAllocation, .{});
+}
+
+test "request descriptor rejects trailing data and hostile field counts" {
+    const extra = test_descriptor ++ [_]u8{0};
+    try std.testing.expectError(error.InvalidLength, decodeRequestHeadDescriptor(std.testing.allocator, &extra));
+    var empty = [_]u8{0} ** 28;
+    @memset(empty[24..28], 255);
+    try std.testing.expectError(error.FrameTooLarge, decodeRequestHeadDescriptor(std.testing.allocator, &empty));
+    @memset(empty[0..4], 255);
+    try std.testing.expectError(error.TruncatedPayload, decodeRequestHeadDescriptor(std.testing.allocator, &empty));
+}
+
+test "request encoded size matches all token and connection normalization branches" {
+    const names = [_][]const u8{ "host", "x-custom", "connection", "x-server-native-connection" };
+    const values = [_][]const u8{ "", "foo", "keep-alive, upgrade", " , \t , ", "__server_native_empty_connection__" };
+    for (names) |name| for (values) |value| {
+        const head: RequestHead = .{ .method = "POST", .scheme = "https", .authority = "test", .path = "/", .query = "a=b", .protocol = "HTTP/2", .headers = &.{.{ .name = name, .value = value }} };
+        const size = try requestStartEncodedSize(head);
+        const out = try std.testing.allocator.alloc(u8, size);
+        defer std.testing.allocator.free(out);
+        try std.testing.expectEqual(size, (try encodeRequestStart(head, out)).len);
+        try std.testing.expectError(error.BufferTooSmall, encodeRequestStart(head, out[0 .. size - 1]));
+    };
 }

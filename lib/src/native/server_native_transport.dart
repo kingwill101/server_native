@@ -1,8 +1,10 @@
 import 'dart:ffi' as ffi;
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
-import 'package:server_native/src/ffi.g.dart';
+import 'package:server_native/src/ffi.g.dart' as rust_ffi;
+import 'package:server_native/src/zig_ffi.g.dart' as zig_ffi;
 
 const int bridgeBackendKindTcp = 0;
 const int bridgeBackendKindUnix = 1;
@@ -14,15 +16,16 @@ const int benchmarkModeStaticServerNativeDirectShape = 2;
 const int benchmarkModeStaticRoutedFfiDirectShape =
     benchmarkModeStaticServerNativeDirectShape;
 
-typedef NativeDirectRequestCallback =
-    void Function(int requestId, Uint8List payload);
+typedef NativeDirectRequestCallback = void Function(
+  int requestId,
+  Uint8List payload,
+);
 
-typedef _NativeDirectRequestCallbackC =
-    ffi.Void Function(
-      ffi.Uint64 requestId,
-      ffi.Pointer<ffi.Uint8> payload,
-      ffi.Uint64 payloadLen,
-    );
+typedef _NativeDirectRequestCallbackC = ffi.Void Function(
+  ffi.Uint64 requestId,
+  ffi.Pointer<ffi.Uint8> payload,
+  ffi.Uint64 payloadLen,
+);
 
 final Set<ffi.NativeCallable<_NativeDirectRequestCallbackC>>
 _retainedDirectRequestCallbacks =
@@ -42,20 +45,63 @@ final class NativeDirectRequestFrame {
   final Uint8List payload;
 }
 
-/// Returns the ABI version for the linked Rust native asset.
-int transportAbiVersion() => server_native_transport_version();
+const _compileTimeBackend = String.fromEnvironment(
+  'server_native.backend',
+  defaultValue: 'rust',
+);
 
-/// Handle to a running native Rust proxy transport server.
+bool _zigApiInitialized = false;
+
+String _configuredBackend() {
+  final runtime = Platform.environment['SERVER_NATIVE_BACKEND'];
+  final value = (runtime == null || runtime.trim().isEmpty)
+      ? _compileTimeBackend
+      : runtime;
+  final normalized = value.trim().toLowerCase();
+  if (normalized == 'rust' || normalized == 'zig') {
+    return normalized;
+  }
+  throw StateError(
+    'Invalid SERVER_NATIVE_BACKEND/server_native.backend value "$value"; '
+    'expected "rust" or "zig".',
+  );
+}
+
+bool get _useZig => _configuredBackend() == 'zig';
+
+void _ensureZigApiInitialized() {
+  if (_zigApiInitialized) return;
+  final result = zig_ffi.server_native_dart_api_initialize(
+    ffi.NativeApi.initializeApiDLData,
+  );
+  if (result != 0) {
+    throw StateError(
+      'Failed to initialize the Zig Dart API-DL bridge: $result',
+    );
+  }
+  _zigApiInitialized = true;
+}
+
+/// Returns the ABI version for the selected native transport asset.
+int transportAbiVersion() => _useZig
+    ? zig_ffi.server_native_zig_transport_version()
+    : rust_ffi.server_native_transport_version();
+
+/// Handle to a running native proxy transport server.
+
 final class NativeProxyServer {
   NativeProxyServer._(
     this._handle,
     this.port, {
+    required bool zigBackend,
     ffi.NativeCallable<_NativeDirectRequestCallbackC>? directRequestCallback,
-  }) : _directRequestCallback = directRequestCallback;
+  }) : _zigBackend = zigBackend,
+       _directRequestCallback = directRequestCallback;
 
-  final ffi.Pointer<ProxyServerHandle> _handle;
+  final ffi.Pointer<ffi.Void> _handle;
   final ffi.NativeCallable<_NativeDirectRequestCallbackC>?
   _directRequestCallback;
+  final bool _zigBackend;
 
   /// Public port exposed by the Rust transport server.
   final int port;
@@ -118,10 +164,27 @@ final class NativeProxyServer {
       );
     }
 
-    final configPtr = calloc<ServerNativeProxyConfig>();
+    final useZig = _useZig;
+    if (useZig) {
+      _ensureZigApiInitialized();
+      if (directRequestCallback != null) {
+        throw UnsupportedError(
+          'Zig backend uses the Dart API-DL queue and does not support '
+          'NativeDirectRequestCallback yet.',
+        );
+      }
+    }
+
+    final configPtr = calloc<rust_ffi.ServerNativeProxyConfig>();
     final outPortPtr = calloc<ffi.Uint16>();
     final hostPtr = host.toNativeUtf8();
-    final backendHostPtr = backendHost.toNativeUtf8();
+    // Rust's callback queue mode still validates a placeholder upstream;
+    // Zig uses an empty endpoint to distinguish queue mode from bridge mode.
+    final nativeBackendHost =
+        !_useZig && backendHost.isEmpty ? InternetAddress.loopbackIPv4.address : backendHost;
+    final nativeBackendPort =
+        !_useZig && backendHost.isEmpty ? 9 : backendPort;
+    final backendHostPtr = nativeBackendHost.toNativeUtf8();
     final backendPathPtr = backendPath?.toNativeUtf8();
     final tlsCertPathPtr = tlsCertPath?.toNativeUtf8();
     final tlsKeyPathPtr = tlsKeyPath?.toNativeUtf8();
@@ -150,7 +213,7 @@ final class NativeProxyServer {
         ..host = hostPtr.cast<ffi.Char>()
         ..port = port
         ..backend_host = backendHostPtr.cast<ffi.Char>()
-        ..backend_port = backendPort
+        ..backend_port = nativeBackendPort
         ..backend_kind = backendKind
         ..backend_path = (backendPathPtr ?? ffi.nullptr).cast<ffi.Char>()
         ..backlog = backlog
@@ -166,7 +229,14 @@ final class NativeProxyServer {
         ..benchmark_mode = benchmarkMode
         ..direct_request_callback = nativeCallbackPtr.cast<ffi.Void>();
 
-      final handle = server_native_start_proxy_server(configPtr, outPortPtr);
+      final ffi.Pointer<ffi.Void> handle = useZig
+          ? zig_ffi.server_native_zig_start_proxy_server(
+              configPtr.cast<ffi.Void>(),
+              outPortPtr,
+            )
+          : rust_ffi
+                .server_native_start_proxy_server(configPtr, outPortPtr)
+                .cast<ffi.Void>();
       if (handle == ffi.nullptr) {
         nativeCallback?.close();
         throw StateError(
@@ -181,6 +251,7 @@ final class NativeProxyServer {
       return NativeProxyServer._(
         handle,
         outPortPtr.value,
+        zigBackend: useZig,
         directRequestCallback: nativeCallback,
       );
     } finally {
@@ -207,7 +278,13 @@ final class NativeProxyServer {
   void close() {
     if (_closed) return;
     _closed = true;
-    server_native_stop_proxy_server(_handle);
+    if (_zigBackend) {
+      zig_ffi.server_native_zig_stop_proxy_server(_handle);
+    } else {
+      rust_ffi.server_native_stop_proxy_server(
+        _handle.cast<rust_ffi.ProxyServerHandle>(),
+      );
+    }
     if (_directRequestCallback != null) {
       // Intentionally retained after shutdown; see note below.
     }
@@ -228,13 +305,20 @@ final class NativeProxyServer {
     final payloadPtr = calloc<ffi.Uint8>(responsePayload.length);
     try {
       payloadPtr.asTypedList(responsePayload.length).setAll(0, responsePayload);
-      return server_native_push_direct_response_frame(
-            _handle,
-            requestId,
-            payloadPtr,
-            responsePayload.length,
-          ) !=
-          0;
+      final result = _zigBackend
+          ? zig_ffi.server_native_zig_push_direct_response_frame(
+              _handle,
+              requestId,
+              payloadPtr,
+              responsePayload.length,
+            )
+          : rust_ffi.server_native_push_direct_response_frame(
+              _handle.cast<rust_ffi.ProxyServerHandle>(),
+              requestId,
+              payloadPtr,
+              responsePayload.length,
+            );
+      return result != 0;
     } finally {
       calloc.free(payloadPtr);
     }
@@ -264,13 +348,21 @@ final class NativeProxyServer {
     final payloadPtrPtr = calloc<ffi.Pointer<ffi.Uint8>>();
     final payloadLenPtr = calloc<ffi.Uint64>();
     try {
-      final ok = server_native_poll_direct_request_frame(
-        _handle,
-        timeoutMs,
-        requestIdPtr,
-        payloadPtrPtr,
-        payloadLenPtr,
-      );
+      final ok = _zigBackend
+          ? zig_ffi.server_native_zig_poll_direct_request_frame(
+              _handle,
+              timeoutMs,
+              requestIdPtr,
+              payloadPtrPtr,
+              payloadLenPtr,
+            )
+          : rust_ffi.server_native_poll_direct_request_frame(
+              _handle.cast<rust_ffi.ProxyServerHandle>(),
+              timeoutMs,
+              requestIdPtr,
+              payloadPtrPtr,
+              payloadLenPtr,
+            );
       if (ok == 0) {
         return null;
       }
@@ -287,7 +379,17 @@ final class NativeProxyServer {
       final payloadBytes = Uint8List.fromList(
         payloadPtr.asTypedList(payloadLen),
       );
-      server_native_free_direct_request_payload(payloadPtr, payloadLen);
+      if (_zigBackend) {
+        zig_ffi.server_native_zig_free_direct_request_payload(
+          payloadPtr,
+          payloadLen,
+        );
+      } else {
+        rust_ffi.server_native_free_direct_request_payload(
+          payloadPtr,
+          payloadLen,
+        );
+      }
       return NativeDirectRequestFrame(
         requestId: requestIdPtr.value,
         payload: payloadBytes,

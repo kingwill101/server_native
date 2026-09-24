@@ -1,4 +1,6 @@
 const std = @import("std");
+const abi = @import("abi.zig");
+const proxy = @import("proxy.zig");
 
 // Zig-only adapters; no new C exports or Dart bindings.
 pub const http2 = @import("http2.zig");
@@ -8,8 +10,79 @@ const c = @cImport({
     @cInclude("dart_api_dl.h");
 });
 
-export fn server_native_transport_version() c_int {
+export fn server_native_zig_transport_version() c_int {
     return 1;
+}
+
+export fn server_native_zig_start_proxy_server(
+    config: ?*anyopaque,
+    out_port: ?*u16,
+) ?*anyopaque {
+    const config_ptr = config orelse return null;
+    const port_ptr = out_port orelse return null;
+    const typed_config: *const abi.c.ServerNativeProxyConfig = @ptrCast(@alignCast(config_ptr));
+    const server = proxy.ProxyServer.create(typed_config, port_ptr) orelse return null;
+    return proxy.asHandle(server);
+}
+
+export fn server_native_zig_stop_proxy_server(handle: ?*anyopaque) void {
+    const opaque_handle = handle orelse return;
+    proxy.fromHandle(opaque_handle).stop();
+}
+
+export fn server_native_zig_push_direct_response_frame(
+    handle: ?*anyopaque,
+    request_id: u64,
+    response_payload: ?[*]const u8,
+    response_payload_len: u64,
+) u8 {
+    const opaque_handle = handle orelse return 0;
+    const payload = response_payload orelse return 0;
+    return @intFromBool(proxy.fromHandle(opaque_handle).pushResponse(
+        request_id,
+        payload,
+        response_payload_len,
+    ));
+}
+
+export fn server_native_zig_complete_direct_request(
+    handle: ?*anyopaque,
+    request_id: u64,
+    response_payload: ?[*]const u8,
+    response_payload_len: u64,
+) u8 {
+    return server_native_zig_push_direct_response_frame(
+        handle,
+        request_id,
+        response_payload,
+        response_payload_len,
+    );
+}
+
+export fn server_native_zig_poll_direct_request_frame(
+    handle: ?*anyopaque,
+    timeout_millis: u32,
+    out_request_id: ?*u64,
+    out_payload: ?*?[*]u8,
+    out_payload_len: ?*u64,
+) u8 {
+    const opaque_handle = handle orelse return 0;
+    const request_id_ptr = out_request_id orelse return 0;
+    const payload_ptr = out_payload orelse return 0;
+    const payload_len_ptr = out_payload_len orelse return 0;
+    return @intFromBool(proxy.fromHandle(opaque_handle).poll(
+        timeout_millis,
+        request_id_ptr,
+        payload_ptr,
+        payload_len_ptr,
+    ));
+}
+
+export fn server_native_zig_free_direct_request_payload(
+    payload: ?[*]u8,
+    payload_len: u64,
+) void {
+    proxy.freePolledPayload(payload, payload_len);
 }
 
 export fn server_native_dart_api_initialize(data: *anyopaque) isize {
@@ -122,13 +195,15 @@ export fn server_native_zig_queue_post_next(
 }
 
 test "reports the active Zig transport ABI version" {
-    try std.testing.expectEqual(@as(c_int, 1), server_native_transport_version());
+    try std.testing.expectEqual(@as(c_int, 1), server_native_zig_transport_version());
 }
 
 test "loads internal Zig modules" {
     _ = @import("protocol_test.zig");
     const bridge_protocol = @import("bridge_protocol.zig");
     const event_queue = @import("event_queue.zig");
+    abi.validate();
+    std.testing.refAllDecls(abi);
     std.testing.refAllDecls(bridge_protocol);
     std.testing.refAllDecls(event_queue);
 }

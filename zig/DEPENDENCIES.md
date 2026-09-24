@@ -90,7 +90,7 @@ shared concurrently between threads.
 
 ## Tests
 
-Run `zig build test`. The suite covers the following cases on Linux x86_64.
+Run `zig build test`. The suite currently passes 65 tests on Linux x86_64.
 `zig build test install` also verifies both library outputs. Coverage includes:
 
 - Pinned library versions.

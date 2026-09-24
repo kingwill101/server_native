@@ -7,8 +7,76 @@ library;
 
 import 'dart:ffi' as ffi;
 
-@ffi.Native<ffi.Int32 Function()>(symbol: 'server_native_transport_version')
-external int server_native_transport_version();
+@ffi.Native<ffi.Int32 Function()>(symbol: 'server_native_zig_transport_version')
+external int server_native_zig_transport_version();
+
+@ffi.Native<
+  ffi.Pointer<ffi.Void> Function(ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Uint16>)
+>(symbol: 'server_native_zig_start_proxy_server')
+external ffi.Pointer<ffi.Void> server_native_zig_start_proxy_server(
+  ffi.Pointer<ffi.Void> config,
+  ffi.Pointer<ffi.Uint16> outPort,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_stop_proxy_server',
+)
+external void server_native_zig_stop_proxy_server(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<
+  ffi.Uint8 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+  )
+>(symbol: 'server_native_zig_push_direct_response_frame')
+external int server_native_zig_push_direct_response_frame(
+  ffi.Pointer<ffi.Void> handle,
+  int requestId,
+  ffi.Pointer<ffi.Uint8> responsePayload,
+  int responsePayloadLen,
+);
+
+@ffi.Native<
+  ffi.Uint8 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Uint32,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Pointer<ffi.Pointer<ffi.Uint8>>,
+    ffi.Pointer<ffi.Uint64>,
+  )
+>(symbol: 'server_native_zig_poll_direct_request_frame')
+external int server_native_zig_poll_direct_request_frame(
+  ffi.Pointer<ffi.Void> handle,
+  int timeoutMillis,
+  ffi.Pointer<ffi.Uint64> outRequestId,
+  ffi.Pointer<ffi.Pointer<ffi.Uint8>> outPayload,
+  ffi.Pointer<ffi.Uint64> outPayloadLen,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Uint8>, ffi.Uint64)>(
+  symbol: 'server_native_zig_free_direct_request_payload',
+)
+external void server_native_zig_free_direct_request_payload(
+  ffi.Pointer<ffi.Uint8> payload,
+  int payloadLen,
+);
+
+@ffi.Native<
+  ffi.Uint8 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+  )
+>(symbol: 'server_native_zig_complete_direct_request')
+external int server_native_zig_complete_direct_request(
+  ffi.Pointer<ffi.Void> handle,
+  int requestId,
+  ffi.Pointer<ffi.Uint8> responsePayload,
+  int responsePayloadLen,
+);
 
 @ffi.Native<ffi.IntPtr Function(ffi.Pointer<ffi.Void>)>(
   symbol: 'server_native_dart_api_initialize',

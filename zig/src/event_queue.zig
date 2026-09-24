@@ -192,3 +192,125 @@ test "queue validates capacity and payload limits" {
     defer queue.deinit();
     try std.testing.expectError(error.PayloadTooLarge, queue.push(1, "abc"));
 }
+
+test "queue wraps its ring repeatedly without reordering" {
+    var queue = try Queue.init(std.testing.allocator, 3);
+    defer queue.deinit();
+    for (0..200) |round| {
+        for (0..3) |i| try queue.push(@intCast(round * 3 + i), "payload");
+        try std.testing.expectError(error.QueueFull, queue.push(-1, "rejected"));
+        for (0..3) |i| {
+            const event = queue.pop().?;
+            defer queue.release(event);
+            try std.testing.expectEqual(@as(i64, @intCast(round * 3 + i)), event.request_id);
+            try std.testing.expectEqualStrings("payload", event.payload);
+        }
+        try std.testing.expectEqual(@as(usize, 0), queue.queuedBytes());
+    }
+}
+
+test "queue zero length payloads occupy slots but no byte budget" {
+    var queue = try Queue.initWithByteLimit(std.testing.allocator, 2, 1);
+    defer queue.deinit();
+    try queue.push(std.math.minInt(i64), "");
+    try queue.push(std.math.maxInt(i64), "");
+    try std.testing.expectEqual(@as(usize, 0), queue.queuedBytes());
+    try std.testing.expectError(error.QueueFull, queue.push(0, ""));
+    const first = queue.pop().?;
+    defer queue.release(first);
+    try std.testing.expectEqual(std.math.minInt(i64), first.request_id);
+    try queue.push(0, "x");
+    try std.testing.expectEqual(@as(usize, 1), queue.queuedBytes());
+}
+
+fn allocationQueue(allocator: std.mem.Allocator) !void {
+    var queue = try Queue.init(allocator, 3);
+    defer queue.deinit();
+    try queue.push(1, "one");
+    try queue.push(2, "two");
+    const event = queue.pop().?;
+    queue.release(event);
+    try queue.push(3, "three");
+}
+
+test "queue every allocation failure releases queued payloads" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationQueue, .{});
+}
+
+test "queue rejected insertion preserves existing payload and counters" {
+    var queue = try Queue.initWithByteLimit(std.testing.allocator, 4, 4);
+    defer queue.deinit();
+    try queue.push(7, "abcd");
+    try std.testing.expectError(error.PayloadTooLarge, queue.push(8, "abcde"));
+    try std.testing.expectError(error.QueueFull, queue.push(8, "x"));
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqual(@as(usize, 4), queue.queuedBytes());
+    const event = queue.pop().?;
+    defer queue.release(event);
+    try std.testing.expectEqualStrings("abcd", event.payload);
+    try std.testing.expectEqual(@as(i64, 7), event.request_id);
+}
+
+const ThreadedQueueProbe = struct {
+    queue: *Queue,
+    finished: std.atomic.Value(usize) = .init(0),
+    failed: std.atomic.Value(bool) = .init(false),
+    fn produce(self: *ThreadedQueueProbe, producer: usize) void {
+        defer _ = self.finished.fetchAdd(1, .release);
+        for (0..200) |sequence| {
+            const id: u32 = @intCast(producer * 200 + sequence);
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, id, .big);
+            var pushed = false;
+            for (0..1000000) |_| {
+                self.queue.push(id, &bytes) catch |err| {
+                    if (err == error.QueueFull) {
+                        std.Thread.yield() catch {};
+                        continue;
+                    }
+                    self.failed.store(true, .release);
+                    return;
+                };
+                pushed = true;
+                break;
+            }
+            if (!pushed) {
+                self.failed.store(true, .release);
+                return;
+            }
+        }
+    }
+};
+
+test "queue concurrent producers deliver every owned event exactly once" {
+    var queue = try Queue.init(std.testing.allocator, 7);
+    defer queue.deinit();
+    var probe: ThreadedQueueProbe = .{ .queue = &queue };
+    var threads: [4]std.Thread = undefined;
+    var spawned: usize = 0;
+    defer for (threads[0..spawned]) |thread| thread.join();
+    for (&threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, ThreadedQueueProbe.produce, .{ &probe, i });
+        spawned += 1;
+    }
+    var seen = [_]bool{false} ** 800;
+    var next = [_]usize{0} ** 4;
+    var count: usize = 0;
+    for (0..10000000) |_| {
+        if (queue.pop()) |event| {
+            defer queue.release(event);
+            const id: usize = @intCast(event.request_id);
+            try std.testing.expect(id < seen.len);
+            try std.testing.expect(!seen[id]);
+            seen[id] = true;
+            try std.testing.expectEqual(@as(u32, @intCast(id)), std.mem.readInt(u32, event.payload[0..4], .big));
+            try std.testing.expectEqual(next[id / 200], id % 200);
+            next[id / 200] += 1;
+            count += 1;
+        } else if (probe.finished.load(.acquire) == 4) break else std.Thread.yield() catch {};
+    }
+    try std.testing.expect(!probe.failed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 800), count);
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+    try std.testing.expectEqual(@as(usize, 0), queue.queuedBytes());
+}
