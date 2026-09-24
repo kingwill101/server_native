@@ -12,6 +12,7 @@ final class _NativeDirectRequestStreamState {
   BridgeDetachedSocket? detachedSocket;
   int responseStatusCode = HttpStatus.ok;
   bool detachedSocketUsesTunnel = false;
+  final tunnelInputClosed = Completer<void>();
   final List<Uint8List> _pendingUnconsumedBodyChunks = <Uint8List>[];
   bool requestEnded = false;
   bool responseCompleted = false;
@@ -214,6 +215,7 @@ NativeProxyServer _startNativeDirectProxy({
               if (usesTunnel &&
                   identical(nativeDirectStreams[requestId], streamState)) {
                 pushResponsePayload(BridgeTunnelFrame.encodeClosePayload());
+                await streamState.tunnelInputClosed.future;
               }
               await removeNativeDirectStream(
                 streamState: streamState,
@@ -374,13 +376,10 @@ NativeProxyServer _startNativeDirectProxy({
           try {
             BridgeTunnelFrame.decodeClosePayload(requestPayload);
           } catch (_) {}
-          unawaited(
-            removeNativeDirectStream(
-              streamState: streamState,
-              closeDetachedSocket: true,
-              closeTrackedRequest: true,
-            ),
-          );
+          unawaited(detachedSocket.bridgeSocket.close());
+          if (!streamState.tunnelInputClosed.isCompleted) {
+            streamState.tunnelInputClosed.complete();
+          }
           return;
         }
       }

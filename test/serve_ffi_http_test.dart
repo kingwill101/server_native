@@ -213,6 +213,110 @@ void main() {
     await _stopServer(running);
   });
 
+  for (final mode in ['HttpServer', 'bridge', 'direct']) {
+    for (final serverCloses in [false, true]) {
+      test('WebSocket close parity $mode serverCloses=$serverCloses', () async {
+        final serverDone = Completer<void>();
+        int? serverCode;
+        String? serverReason;
+        Future<void> handler(HttpRequest request) async {
+          if (request.uri.path != '/ws') {
+            await request.response.close();
+            return;
+          }
+          final ws = await WebSocketTransformer.upgrade(request);
+          ws.listen(
+            (message) {
+              if (serverCloses) {
+                unawaited(ws.close(1000, 'done'));
+              } else {
+                ws.add(message);
+              }
+            },
+            onDone: () {
+              serverCode = ws.closeCode;
+              serverReason = ws.closeReason;
+              serverDone.complete();
+            },
+          );
+        }
+
+        late Uri uri;
+        if (mode == 'HttpServer') {
+          final server = await HttpServer.bind('127.0.0.1', 0);
+          server.listen(handler);
+          addTearDown(() => server.close(force: true));
+          uri = Uri.parse('ws://127.0.0.1:${server.port}/ws');
+        } else {
+          final running = await _startHttpBridgeServer(
+            handler,
+            nativeCallback: mode == 'direct',
+          );
+          addTearDown(() => _stopServer(running));
+          uri = running.baseUri.replace(scheme: 'ws', path: '/ws');
+        }
+        final client = await WebSocket.connect(uri.toString())
+            .timeout(const Duration(seconds: 3));
+        addTearDown(() => client.close());
+        final echoed = Completer<void>();
+        final clientDone = Completer<void>();
+        client.listen((message) {
+          expect(message, 'hello');
+          echoed.complete();
+        }, onDone: clientDone.complete);
+        client.add('hello');
+        if (!serverCloses) {
+          await echoed.future.timeout(const Duration(seconds: 3));
+          await client.close(1000, 'done');
+        }
+        await clientDone.future.timeout(const Duration(seconds: 3));
+        await serverDone.future.timeout(const Duration(seconds: 3));
+        expect(client.closeCode, 1000);
+        expect(client.closeReason, 'done');
+        expect(serverCode, 1000);
+        expect(serverReason, 'done');
+      });
+    }
+  }
+
+  for (final nativeCallback in [false, true]) {
+    test(
+      'WebSocket repeats text and binary echo (nativeCallback=$nativeCallback)',
+      () async {
+        final running = await _startHttpBridgeServer((request) async {
+          if (request.uri.path != '/ws') {
+            await request.response.close();
+            return;
+          }
+          final socket = await WebSocketTransformer.upgrade(request);
+          socket.listen(socket.add, onDone: () => socket.close());
+        }, nativeCallback: nativeCallback);
+        addTearDown(() => _stopServer(running));
+        final socket = await WebSocket.connect(
+          running.baseUri.replace(scheme: 'ws', path: '/ws').toString(),
+          compression: CompressionOptions.compressionOff,
+        ).timeout(const Duration(seconds: 3));
+        addTearDown(() => socket.close());
+        final messages = StreamIterator<dynamic>(socket);
+        for (final payload in <Object>[
+          'first',
+          Uint8List.fromList(List.generate(32768, (i) => i % 256)),
+          '',
+          'last',
+        ]) {
+          socket.add(payload);
+          expect(
+            await messages.moveNext().timeout(const Duration(seconds: 3)),
+            isTrue,
+          );
+          expect(messages.current, payload);
+        }
+        await messages.cancel();
+        await socket.close();
+      },
+    );
+  }
+
   test('serveNativeHttp supports WebSocket upgrade', () async {
     final running = await _startHttpBridgeServer((request) async {
       if (request.uri.path == '/ws') {

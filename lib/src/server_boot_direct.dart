@@ -451,6 +451,8 @@ Future<void> _runDetachedSocketTunnel(
           chunk,
         );
       }
+      writer.writeFrame(BridgeTunnelFrame.encodeClosePayload());
+      await writer.flush();
     } catch (_) {
       // Peer bridge disconnect and write errors both terminate the tunnel.
     }
@@ -477,10 +479,10 @@ Future<void> _runDetachedSocketTunnel(
         'unexpected bridge frame while detached socket tunnel is active',
       );
     }
+    // Incoming EOF closes only the application-facing write direction.
+    await bridgeSocket.close();
+    await outboundTask;
   } finally {
     await detachedSocket.close();
-    try {
-      await outboundTask;
-    } catch (_) {}
   }
 }

@@ -92,6 +92,8 @@ final class _BridgeSocketWriter {
     }
   }
 
+  Future<void> flush() => _socket.flush();
+
   /// Writes one chunk frame and flushes the socket immediately.
   Future<void> writeChunkFrameAndFlush(
     int frameType,

@@ -498,6 +498,7 @@ async fn run_websocket_tunnel(
             }
             if frame_type == BRIDGE_TUNNEL_CLOSE_FRAME_TYPE {
                 decode_bridge_tunnel_close(&payload)?;
+                frontend_writer.shutdown().await.map_err(|error| error.to_string())?;
                 return Ok(());
             }
             return Err(format!("unexpected bridge tunnel frame type: {frame_type}"));

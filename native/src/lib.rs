@@ -2356,6 +2356,7 @@ async fn run_direct_websocket_tunnel(
             if frame_type == BRIDGE_TUNNEL_CLOSE_FRAME_TYPE {
                 decode_bridge_tunnel_close(&payload)
                     .map_err(|error| format!("decode response failed: {error}"))?;
+                frontend_writer.shutdown().await.map_err(|error| error.to_string())?;
                 return Ok(());
             }
             return Err(format!(
