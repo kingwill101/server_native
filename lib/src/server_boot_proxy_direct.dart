@@ -440,6 +440,7 @@ NativeProxyServer _startNativeDirectProxy({
   proxyRef = proxy;
 
   unawaited(() async {
+    var drained = 0;
     while (!proxyRef.isClosed) {
       NativeDirectRequestFrame? frame;
       try {
@@ -457,11 +458,15 @@ NativeProxyServer _startNativeDirectProxy({
         continue;
       }
       if (frame == null) {
-        await Future<void>.delayed(const Duration(milliseconds: 1));
+        drained = 0;
+        await proxyRef.waitForDirectRequestFrame();
         continue;
       }
       processRequestFrame(frame.requestId, frame.payload);
-      await Future<void>.delayed(Duration.zero);
+      if (++drained == 64) {
+        drained = 0;
+        await Future<void>.delayed(Duration.zero);
+      }
     }
   }());
 

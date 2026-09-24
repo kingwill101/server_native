@@ -97,7 +97,7 @@ pub fn serveConnection(
     const start = try allocator.alloc(u8, start_size);
     defer allocator.free(start);
     _ = try bridge_protocol.encodeRequestStart(head, start);
-    try server.queue.push(@bitCast(request_id), start);
+    if (!server.bridgeEnabled()) try server.queue.push(@bitCast(request_id), start);
 
     const body = if (chunked_body)
         try decodeChunkedBody(request_allocator, input.items[header_end.?..])

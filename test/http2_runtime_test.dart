@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:http2/transport.dart';
 import 'package:server_native/server_native.dart';
 import 'package:test/test.dart';
 
@@ -80,4 +83,64 @@ void main() {
       );
     }
   }
+
+  test(
+    'HTTP/2 runtime preserves concurrent progress after stream cancellation',
+    () async {
+      final server = await NativeHttpServer.bind(
+        '127.0.0.1',
+        0,
+        http2: true,
+        http3: false,
+      );
+      final pending = Completer<void>();
+      final entered = Completer<void>();
+      server.listen((request) async {
+        if (request.uri.path == '/pending') {
+          entered.complete();
+          await pending.future;
+        }
+        request.response.write(request.uri.path);
+        await request.response.close();
+      });
+      final socket = await Socket.connect('127.0.0.1', server.port);
+      final client = ClientTransportConnection.viaSocket(socket);
+      List<Header> headers(String path) => [
+        Header.ascii(':method', 'GET'),
+        Header.ascii(':path', path),
+        Header.ascii(':scheme', 'http'),
+        Header.ascii(':authority', '127.0.0.1:${server.port}'),
+      ];
+      Future<String> read(ClientTransportStream stream) async {
+        final bytes = BytesBuilder();
+        await for (final message in stream.incomingMessages) {
+          if (message is DataStreamMessage) bytes.add(message.bytes);
+        }
+        return utf8.decode(bytes.takeBytes());
+      }
+
+      try {
+        final pendingStream = client.makeRequest(
+          headers('/pending'),
+          endStream: true,
+        );
+        final pendingResponse = read(pendingStream);
+        await entered.future.timeout(const Duration(seconds: 3));
+        pendingStream.terminate();
+
+        final fastResponse = read(
+          client.makeRequest(headers('/fast'), endStream: true),
+        );
+        expect(await fastResponse.timeout(const Duration(seconds: 1)), '/fast');
+        await pendingResponse.timeout(
+          const Duration(seconds: 1),
+          onTimeout: () => '',
+        );
+      } finally {
+        pending.complete();
+        await client.finish();
+        await server.close(force: true);
+      }
+    },
+  );
 }

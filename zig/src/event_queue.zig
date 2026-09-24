@@ -40,6 +40,18 @@ pub const Queue = struct {
     len: usize = 0,
     queued_bytes: usize = 0,
     byte_limit: usize,
+    notify_context: ?*anyopaque = null,
+    notify: ?*const fn (?*anyopaque) void = null,
+
+    // Registration and empty-to-nonempty transitions share the queue lock so a
+    // port installed after producers start cannot miss already queued work.
+    pub fn setNotifier(self: *Queue, context: ?*anyopaque, notify: ?*const fn (?*anyopaque) void) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.notify_context = context;
+        self.notify = notify;
+        if (self.len != 0) if (notify) |wake| wake(context);
+    }
 
     pub fn init(allocator: std.mem.Allocator, slot_capacity: usize) Error!Queue {
         return initWithByteLimit(allocator, slot_capacity, max_queued_bytes);
@@ -120,6 +132,7 @@ pub const Queue = struct {
         };
         self.len += 1;
         self.queued_bytes += owned.len;
+        if (self.len == 1) if (self.notify) |wake| wake(self.notify_context);
     }
 
     pub fn pop(self: *Queue) ?Event {
@@ -313,4 +326,29 @@ test "queue concurrent producers deliver every owned event exactly once" {
     try std.testing.expectEqual(@as(usize, 800), count);
     try std.testing.expectEqual(@as(usize, 0), queue.count());
     try std.testing.expectEqual(@as(usize, 0), queue.queuedBytes());
+}
+
+test "queue notifier catches registration race and coalesces pending work" {
+    const Probe = struct {
+        count: usize = 0,
+        fn wake(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+        }
+    };
+    var queue = try Queue.init(std.testing.allocator, 3);
+    defer queue.deinit();
+    var probe = Probe{};
+    try queue.push(1, "before registration");
+    queue.setNotifier(&probe, Probe.wake);
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+    try queue.push(2, "same wake");
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+    while (queue.pop()) |event| queue.release(event);
+    try queue.push(3, "rearmed");
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+    queue.setNotifier(null, null);
+    while (queue.pop()) |event| queue.release(event);
+    try queue.push(4, "detached");
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
 }

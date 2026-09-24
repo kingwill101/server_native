@@ -153,3 +153,25 @@ owned by nghttp2. Control inspection must not bypass CONTINUATION requirements.
 Connection teardown follows nghttp2's read/write interest after output is flushed.
 Passing h2spec alone does not prove cancellation while a Dart handler is pending,
 concurrent handler progress, or streaming/backpressure parity for the runtime.
+
+## Handler scheduling and Dart wake-ups
+
+The HTTP/2 connection thread owns its nghttp2 session and advances each request
+independently. Backend writes are nonblocking; bridge replies and direct replies
+are polled with bounded work per stream. A pending Dart handler therefore does
+not prevent another stream, PING, or RST_STREAM from progressing. Reset streams
+release their backend connection or native request ID, and late replies cannot
+be submitted to a different stream.
+
+The Zig proxy queue posts an API-DL integer notification on empty-to-nonempty
+transitions. Registering a port also wakes it if work is already queued. Dart
+uses that notification to drain FFI frames in batches of up to 64 before yielding,
+and waits on the port when idle. The port carries no request bodies. Shutdown
+detaches the notifier before stopping the native producer and closing the port.
+Rust retains its existing polling fallback.
+
+`test/http2_concurrency_test.dart` holds a Dart handler open while checking a
+second stream, PING, cancellation, and a late response in bridge/direct modes
+over cleartext and TLS. It does not require h2spec. Request bodies are still
+buffered before dispatch (32 MiB limit); responses are buffered (4 MiB limit).
+Streaming body parity and broader memory/backpressure limits need further work.

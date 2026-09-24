@@ -7,6 +7,9 @@ const proxy_http2 = @import("proxy_http2.zig");
 const http1 = @import("http1.zig").posix;
 
 const c = abi.c;
+const dart = @cImport({
+    @cInclude("dart_api_dl.h");
+});
 
 const Mutex = struct {
     state: std.atomic.Value(u8) = .init(0),
@@ -43,6 +46,20 @@ pub const ProxyServer = struct {
     backend_port: u16 = 0,
     tls: ?http1.TlsContext = null,
     http2_enabled: bool = false,
+    event_port: std.atomic.Value(i64) = .init(0),
+
+    pub fn setEventPort(self: *ProxyServer, port: i64) void {
+        self.event_port.store(port, .release);
+        self.queue.setNotifier(self, if (port == 0) null else notifyDart);
+    }
+
+    fn notifyDart(context: ?*anyopaque) void {
+        const self: *ProxyServer = @ptrCast(@alignCast(context.?));
+        const port = self.event_port.load(.acquire);
+        if (port == 0) return;
+        const post = dart.Dart_PostInteger_DL orelse return;
+        _ = post(port, 1);
+    }
 
     pub fn create(config: *const c.ServerNativeProxyConfig, out_port: *u16) ?*ProxyServer {
         const allocator = std.heap.c_allocator;

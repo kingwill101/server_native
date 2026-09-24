@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:isolate';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:typed_data';
@@ -96,7 +98,34 @@ final class NativeProxyServer {
     required bool zigBackend,
     ffi.NativeCallable<_NativeDirectRequestCallbackC>? directRequestCallback,
   }) : _zigBackend = zigBackend,
-       _directRequestCallback = directRequestCallback;
+       _directRequestCallback = directRequestCallback {
+    if (_zigBackend) {
+      final port = _eventPort = ReceivePort();
+      port.listen((_) {
+        if (!_requestReady.isCompleted) _requestReady.complete();
+      });
+      zig_ffi.server_native_zig_set_event_port(
+        _handle,
+        port.sendPort.nativePort,
+      );
+    }
+  }
+
+  ReceivePort? _eventPort;
+  Completer<void> _requestReady = Completer<void>();
+
+  /// Waits for a native queue notification without blocking the Dart isolate.
+  /// Rust retains its polling fallback until its port ABI is available.
+  Future<void> waitForDirectRequestFrame() async {
+    if (_closed) return;
+    if (!_zigBackend) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      return;
+    }
+    final ready = _requestReady;
+    await ready.future;
+    if (identical(_requestReady, ready)) _requestReady = Completer<void>();
+  }
 
   final ffi.Pointer<ffi.Void> _handle;
   final ffi.NativeCallable<_NativeDirectRequestCallbackC>?
@@ -180,10 +209,10 @@ final class NativeProxyServer {
     final hostPtr = host.toNativeUtf8();
     // Rust's callback queue mode still validates a placeholder upstream;
     // Zig uses an empty endpoint to distinguish queue mode from bridge mode.
-    final nativeBackendHost =
-        !_useZig && backendHost.isEmpty ? InternetAddress.loopbackIPv4.address : backendHost;
-    final nativeBackendPort =
-        !_useZig && backendHost.isEmpty ? 9 : backendPort;
+    final nativeBackendHost = !_useZig && backendHost.isEmpty
+        ? InternetAddress.loopbackIPv4.address
+        : backendHost;
+    final nativeBackendPort = !_useZig && backendHost.isEmpty ? 9 : backendPort;
     final backendHostPtr = nativeBackendHost.toNativeUtf8();
     final backendPathPtr = backendPath?.toNativeUtf8();
     final tlsCertPathPtr = tlsCertPath?.toNativeUtf8();
@@ -279,7 +308,10 @@ final class NativeProxyServer {
     if (_closed) return;
     _closed = true;
     if (_zigBackend) {
+      zig_ffi.server_native_zig_set_event_port(_handle, 0);
       zig_ffi.server_native_zig_stop_proxy_server(_handle);
+      _eventPort?.close();
+      if (!_requestReady.isCompleted) _requestReady.complete();
     } else {
       rust_ffi.server_native_stop_proxy_server(
         _handle.cast<rust_ffi.ProxyServerHandle>(),

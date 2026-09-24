@@ -142,3 +142,6 @@ external bool server_native_zig_queue_post_next(
   ffi.Pointer<ffi.Void> handle,
   int port_id,
 );
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>, ffi.Int64)>(symbol: 'server_native_zig_set_event_port')
+external void server_native_zig_set_event_port(ffi.Pointer<ffi.Void> handle, int port);

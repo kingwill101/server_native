@@ -229,6 +229,9 @@ pub fn receiveConnection(connection: *Connection, buffer: []u8) !usize {
 }
 
 pub fn receiveTimeoutConnection(connection: *Connection, buffer: []u8, timeout_ms: i32) !?usize {
+    if (connection.ssl) |ssl| {
+        if (c.SSL_pending(ssl) > 0) return try receiveConnection(connection, buffer);
+    }
     var descriptors = [_]std.posix.pollfd{.{
         .fd = connection.fd,
         .events = std.posix.POLL.IN,
@@ -292,4 +295,17 @@ fn boundPort(fd: Fd, family: c_int) !u16 {
 /// Sends FIN without discarding bytes still arriving from the peer.
 pub fn shutdownWrite(fd: Fd) void {
     _ = c.shutdown(fd, c.SHUT_WR);
+}
+
+/// Returns null when the peer cannot currently accept more bridge bytes.
+pub fn sendNonblocking(fd: Fd, bytes: []const u8) !?usize {
+    const result = c.send(fd, bytes.ptr, bytes.len, c.MSG_DONTWAIT | c.MSG_NOSIGNAL);
+    if (result < 0) {
+        return switch (std.posix.errno(result)) {
+            .AGAIN, .INTR => null,
+            else => error.SendFailed,
+        };
+    }
+    if (result == 0) return error.SendFailed;
+    return @intCast(result);
 }

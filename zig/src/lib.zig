@@ -25,6 +25,11 @@ export fn server_native_zig_start_proxy_server(
     return proxy.asHandle(server);
 }
 
+export fn server_native_zig_set_event_port(handle: ?*anyopaque, port: i64) void {
+    const server = handle orelse return;
+    proxy.fromHandle(server).setEventPort(port);
+}
+
 export fn server_native_zig_stop_proxy_server(handle: ?*anyopaque) void {
     const opaque_handle = handle orelse return;
     proxy.fromHandle(opaque_handle).stop();
