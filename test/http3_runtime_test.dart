@@ -7,9 +7,16 @@ import 'package:test/test.dart';
 
 void main() {
   for (final direct in [false, true]) {
-    for (final independent in [false, true]) {
+    for (final mode in [
+      'curl',
+      'aioquic',
+      'loss',
+      'close-loss',
+      'drain-replay',
+    ]) {
+      final independent = mode != 'curl';
       test(
-        'HTTP/3 ${independent ? 'aioquic' : 'curl'} runtime direct=$direct',
+        'HTTP/3 $mode runtime direct=$direct',
         () async {
           final server = await NativeHttpServer.bindSecure(
             '127.0.0.1',
@@ -108,6 +115,7 @@ void main() {
               final result = await Process.run(python, [
                 'tool/http3_aioquic_client.py',
                 '${server.port}',
+                mode,
               ]);
               expect(
                 result.exitCode,
@@ -136,7 +144,7 @@ void main() {
         skip: independent && Platform.environment['AIOQUIC_PYTHON'] == null
             ? 'Set AIOQUIC_PYTHON to a Python environment with aioquic==1.3.0'
             : false,
-        timeout: const Timeout(Duration(seconds: 30)),
+        timeout: const Timeout(Duration(seconds: 90)),
       );
     }
   }

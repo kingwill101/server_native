@@ -203,11 +203,30 @@ AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=z
 Curl must support HTTP/3. The aioquic cases are reported as skipped when
 `AIOQUIC_PYTHON` is absent. The tests cover uploads, concurrent handler progress,
 reset and late replies, reuse beyond the initial stream allowance, malformed
-UDP input, Alt-Svc, and UDP release in bridge/direct modes.
+UDP input, Alt-Svc, and UDP release in bridge/direct modes. A deterministic
+loopback relay drops the first handshake datagrams and every seventeenth
+packet, delays every eleventh packet, and duplicates every twenty-third packet
+in both directions. Each impairment must occur for the test to pass.
 
-**Step 11 remains open.** Remaining production gates include packet-loss and
-reordering tests, migration-disabled path tests, staged HTTP/3 GOAWAY/draining,
+Additional gates drop the first server CONNECTION_CLOSE packet and replay an
+Initial during draining. The former checks recovery of the HTTP/3 error code;
+the latter checks that the server stays silent rather than starting another
+handshake. These are local fault-injection checks, not WAN load testing.
+
+While the UDP listener remains open, terminal connections retain routing state
+for three probe-timeout intervals, following
+[RFC 9000 section 10.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-10.2).
+Closing repeats the cached close packet only to the original close destination,
+with increasing time between replies and a cumulative three-to-one byte budget.
+Draining emits no packets. Late packets do not extend the retention deadline.
+Incomplete direct request bodies receive their terminal queue frame. If Dart's
+queue is full, cleanup retries without blocking the UDP thread and retains the
+request even after the protocol retention deadline until that frame is queued.
+Forced listener shutdown can still release all retained state immediately.
+
+**Step 11 remains open.** Remaining production gates include migration-disabled
+path tests, staged HTTP/3 GOAWAY and graceful application shutdown,
 address-validation/Retry policy, aggregate memory/backpressure budgets, full
 streaming bodies, IPv6/shared UDP routing, and sustained lifecycle/resource
-stress. Shutdown currently emits CONNECTION_CLOSE and frees state; it does
-not implement the complete QUIC closing/draining retention period.
+stress. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
+socket, so it releases retained connections immediately.

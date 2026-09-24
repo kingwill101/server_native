@@ -63,6 +63,10 @@ Initial scan found:
 - [x] Gate HTTP/1 on the existing Dart/framework suites, direct/bridge differential tests, curl interoperability, and shutdown stress tests.
 - [x] Milestone 2 / HTTP/2: integrate `nghttp2` through Zig C interop, add TLS/ALPN, map streams to the shared frame model, implement flow-control backpressure, cancellation, and concurrent streams, then validate with curl and `h2spec`.
 - [ ] Milestone 3 / HTTP/3: integrate `ngtcp2` + `nghttp3` with the selected QUIC-capable TLS provider, add Alt-Svc, UDP lifecycle, stream reset, graceful close, and independent curl/QUIC interoperability tests.
+  - [x] Initial UDP/ngtcp2/BoringSSL/nghttp3 runtime, shared bridge/direct requests, Alt-Svc, curl and independent aioquic interoperability.
+  - [x] Deterministic bidirectional loss/delay/duplication, lost close recovery, and silent draining replay gates.
+  - [x] Retain closing/draining connection IDs for three PTOs with bounded close replies and no deadline extension.
+  - [ ] Staged GOAWAY/application shutdown, migration-disabled path tests, address-validation/Retry policy, aggregate budgets/streaming, IPv6/shared UDP routing, and sustained resource stress.
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
 - [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
 

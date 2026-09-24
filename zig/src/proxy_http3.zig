@@ -20,6 +20,55 @@ fn randomBytes(dest: [*c]u8, len: usize, _: [*c]const c.ngtcp2_rand_ctx) callcon
     _ = c.RAND_bytes(dest, len);
 }
 
+// RFC 9000 section 10.2: retain routing state for three PTOs while the
+// listening socket stays open. Closing replies are rate-limited; draining
+// never transmits. The deadline is fixed even when late packets arrive.
+const Termination = struct {
+    phase: enum { active, closing, draining, discard } = .active,
+    deadline: u64 = 0,
+    next_reply: u64 = 0,
+    interval: u64 = 0,
+    received_bytes: u64 = 0,
+    replied_bytes: u64 = 0,
+
+    fn begin(self: *Termination, time: u64, pto: u64, draining: bool) void {
+        if (self.phase != .active) return;
+        self.phase = if (draining) .draining else .closing;
+        self.interval = @max(pto, 1);
+        self.deadline = time +| (3 *| self.interval);
+        self.next_reply = time;
+    }
+    fn expired(self: Termination, time: u64) bool {
+        return self.phase != .active and time >= self.deadline;
+    }
+    fn reply(self: *Termination, time: u64, received: usize, response: usize) bool {
+        if (self.phase != .closing or self.expired(time) or response == 0) return false;
+        self.received_bytes +|= received;
+        const allowance = (self.received_bytes *| 3) -| self.replied_bytes;
+        if (time < self.next_reply or response > allowance) return false;
+        self.replied_bytes +|= response;
+        self.interval = self.interval *| 2;
+        self.next_reply = time +| self.interval;
+        return true;
+    }
+};
+
+fn sameAddress(left: *const c.sockaddr_storage, right: *const c.sockaddr_storage) bool {
+    if (left.ss_family != right.ss_family) return false;
+    if (left.ss_family == c.AF_INET) {
+        const a: *const c.sockaddr_in = @ptrCast(@alignCast(left));
+        const b: *const c.sockaddr_in = @ptrCast(@alignCast(right));
+        return a.sin_port == b.sin_port and a.sin_addr.s_addr == b.sin_addr.s_addr;
+    }
+    if (left.ss_family == c.AF_INET6) {
+        const a: *const c.sockaddr_in6 = @ptrCast(@alignCast(left));
+        const b: *const c.sockaddr_in6 = @ptrCast(@alignCast(right));
+        return a.sin6_port == b.sin6_port and a.sin6_scope_id == b.sin6_scope_id and
+            std.mem.eql(u8, std.mem.asBytes(&a.sin6_addr), std.mem.asBytes(&b.sin6_addr));
+    }
+    return false;
+}
+
 pub fn Runtime(comptime Server: type) type {
     return struct {
         const Self = @This();
@@ -73,17 +122,25 @@ pub fn Runtime(comptime Server: type) type {
                 var i: usize = 0;
                 while (i < self.peers.items.len) {
                     const peer = self.peers.items[i];
-                    peer.tick() catch {
-                        peer.failed = true;
-                    };
-                    if (peer.failed) {
-                        peer.closePacket();
+                    if (peer.termination.phase == .active) {
+                        peer.tick() catch {
+                            peer.failed = true;
+                        };
+                        if (peer.failed) peer.beginTermination();
+                    } else {
+                        _ = peer.finishCancelledBodies();
+                    }
+                    // Keep a cancelled body reachable until its final event
+                    // fits in the bounded Dart queue. This never waits here.
+                    if (peer.termination.expired(now()) and peer.finishCancelledBodies()) {
                         _ = self.peers.swapRemove(i);
                         peer.deinit();
                     } else i += 1;
                 }
             }
-            for (self.peers.items) |peer| peer.closePacket();
+            // Forced listener shutdown closes the UDP socket, so it need not
+            // retain routing tombstones after the thread exits.
+            for (self.peers.items) |peer| peer.beginTermination();
         }
         fn receive(self: *Self, packet: []const u8, remote: *c.sockaddr_storage, remote_len: c.socklen_t) !void {
             const version = packetVersion(packet) orelse return;
@@ -105,6 +162,12 @@ pub fn Runtime(comptime Server: type) type {
                 found = peer;
             }
             const peer = found.?;
+            if (peer.termination.phase != .active) {
+                if (sameAddress(remote, &peer.close_remote) and peer.termination.reply(now(), packet.len, peer.close_len)) {
+                    peer.repeatClose();
+                }
+                return;
+            }
             if (peer.failed) return;
             // Active migration is disabled. Never redirect output to an
             // unauthenticated packet's source address.
@@ -140,6 +203,11 @@ pub fn Runtime(comptime Server: type) type {
             failed: bool = false,
             silent: bool = false,
             last_error: c_int = 0,
+            termination: Termination = .{},
+            close_packet: [1350]u8 = undefined,
+            close_len: usize = 0,
+            close_remote: c.sockaddr_storage = std.mem.zeroes(c.sockaddr_storage),
+            close_remote_len: c.socklen_t = 0,
 
             fn create(owner: *Self, header: *c.ngtcp2_pkt_hd, remote: *c.sockaddr_storage, remote_len: c.socklen_t) !*Peer {
                 const self = try allocator.create(Peer);
@@ -212,19 +280,44 @@ pub fn Runtime(comptime Server: type) type {
                 self.streams.deinit();
                 allocator.destroy(self);
             }
-            fn closePacket(self: *Peer) void {
-                if (self.silent) return;
+            fn finishCancelledBodies(self: *Peer) bool {
+                var ready = true;
+                var it = self.streams.valueIterator();
+                while (it.next()) |stream| {
+                    const finished = shared.finishCancelledRequest(self.owner.server, stream.request) catch false;
+                    ready = ready and finished;
+                }
+                return ready;
+            }
+            fn beginTermination(self: *Peer) void {
+                if (self.termination.phase != .active) return;
+                _ = self.finishCancelledBodies();
+                if (self.silent and self.last_error != c.NGTCP2_ERR_DRAINING) {
+                    self.termination.phase = .discard;
+                    return;
+                }
+                self.termination.begin(now(), c.ngtcp2_conn_get_pto2(self.quic), self.last_error == c.NGTCP2_ERR_DRAINING);
+                if (self.termination.phase == .draining) return;
                 var error_code: c.ngtcp2_ccerr = undefined;
                 c.ngtcp2_ccerr_default(&error_code);
                 if (self.codec) |codec| {
                     if (codec.last_error != 0) c.ngtcp2_ccerr_set_application_error(&error_code, c.nghttp3_err_infer_quic_app_error_code(codec.last_error), null, 0);
                 }
                 if (self.last_error != 0 and error_code.error_code == 0) c.ngtcp2_ccerr_set_liberr(&error_code, self.last_error, null, 0);
-                var output: [1350]u8 = undefined;
                 var path = self.networkPath();
                 var info = std.mem.zeroes(c.ngtcp2_pkt_info);
-                const size = c.ngtcp2_conn_write_connection_close(self.quic, &path, &info, &output, output.len, &error_code, now());
-                if (size > 0) self.send(output[0..@intCast(size)], &path) catch {};
+                const size = c.ngtcp2_conn_write_connection_close(self.quic, &path, &info, &self.close_packet, self.close_packet.len, &error_code, now());
+                if (size <= 0) return;
+                self.close_len = @intCast(size);
+                self.close_remote_len = path.remote.addrlen;
+                @memcpy(std.mem.asBytes(&self.close_remote)[0..path.remote.addrlen], @as([*]const u8, @ptrCast(path.remote.addr))[0..path.remote.addrlen]);
+                self.repeatClose();
+            }
+            fn repeatClose(self: *Peer) void {
+                if (self.close_len == 0 or self.termination.phase != .closing) return;
+                // Cache the exact terminal packet. No further normal ngtcp2
+                // reads/writes occur after a fatal library error.
+                _ = c.sendto(self.owner.fd, &self.close_packet, self.close_len, c.MSG_DONTWAIT, @ptrCast(&self.close_remote), self.close_remote_len);
             }
             fn send(self: *Peer, bytes: []const u8, path: *const c.ngtcp2_path) !void {
                 const size = c.sendto(self.owner.fd, bytes.ptr, bytes.len, c.MSG_DONTWAIT, path.remote.addr, path.remote.addrlen);
@@ -484,4 +577,64 @@ test "UDP routing rejects empty and truncated datagrams before native assertions
     try std.testing.expectEqualSlices(u8, short[1..], decoded.dcid[0..decoded.dcidlen]);
     const invalid_long = [_]u8{0xff} ** 1200;
     try std.testing.expect(packetVersion(&invalid_long) == null);
+}
+
+test "QUIC closing retention expires at three PTOs without deadline extension" {
+    var state: Termination = .{};
+    try std.testing.expect(!state.expired(std.math.maxInt(u64)));
+    state.begin(100, 10, false);
+    try std.testing.expectEqual(@as(u64, 130), state.deadline);
+    try std.testing.expect(state.reply(100, 100, 40));
+    try std.testing.expect(!state.reply(119, 100, 40));
+    try std.testing.expect(state.reply(120, 100, 40));
+    state.begin(120, 50, false);
+    try std.testing.expectEqual(@as(u64, 130), state.deadline);
+    try std.testing.expect(!state.reply(121, 100, 40));
+    try std.testing.expect(!state.expired(129));
+    try std.testing.expect(state.expired(130));
+    try std.testing.expect(!state.reply(130, 100, 40));
+}
+
+test "QUIC draining is silent throughout retention" {
+    var state: Termination = .{};
+    state.begin(1, 4, true);
+    for (0..20) |time| try std.testing.expect(!state.reply(time, 100, 40));
+    try std.testing.expect(!state.expired(12));
+    try std.testing.expect(state.expired(13));
+}
+
+test "QUIC closing arithmetic saturates instead of wrapping deadlines" {
+    var state: Termination = .{};
+    state.begin(std.math.maxInt(u64) - 2, std.math.maxInt(u64), false);
+    try std.testing.expectEqual(std.math.maxInt(u64), state.deadline);
+    try std.testing.expect(!state.expired(std.math.maxInt(u64) - 1));
+}
+
+test "closing address check ignores padding and rejects a different peer" {
+    var first = std.mem.zeroes(c.sockaddr_storage);
+    var second = std.mem.zeroes(c.sockaddr_storage);
+    const a: *c.sockaddr_in = @ptrCast(@alignCast(&first));
+    const b: *c.sockaddr_in = @ptrCast(@alignCast(&second));
+    a.sin_family = c.AF_INET;
+    a.sin_port = 1234;
+    a.sin_addr.s_addr = 0x0100007f;
+    b.* = a.*;
+    @memset(&b.sin_zero, 255);
+    try std.testing.expect(sameAddress(&first, &second));
+    b.sin_port += 1;
+    try std.testing.expect(!sameAddress(&first, &second));
+    b.sin_port = a.sin_port;
+    b.sin_addr.s_addr += 1;
+    try std.testing.expect(!sameAddress(&first, &second));
+}
+
+test "QUIC closing replies enforce a cumulative amplification budget" {
+    var state: Termination = .{};
+    state.begin(0, 10, false);
+    try std.testing.expect(!state.reply(0, 10, 40));
+    try std.testing.expect(state.reply(0, 4, 40));
+    try std.testing.expect(!state.reply(20, 0, 40));
+    try std.testing.expect(state.reply(20, 13, 40));
+    try std.testing.expectEqual(@as(u64, 80), state.replied_bytes);
+    try std.testing.expectEqual(@as(u64, 27), state.received_bytes);
 }
