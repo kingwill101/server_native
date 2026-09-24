@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:server_native/server_native.dart';
 import 'package:test/test.dart';
 
+import 'support/udp_binding_probe.dart';
+
 void main() {
   for (final direct in [false, true]) {
     for (final mode in [
@@ -29,6 +31,7 @@ void main() {
             http3: true,
             nativeCallback: direct,
           );
+          final binding = UdpBindingProbe.capture(server.port);
           final entered = Completer<void>();
           final release = Completer<void>();
           server.listen((request) async {
@@ -142,10 +145,7 @@ void main() {
             final child = await Process.start('sleep', ['10']);
             try {
               await server.close(force: true);
-              final udp = await RawDatagramSocket.bind(
-                '127.0.0.1',
-                server.port,
-              );
+              final udp = await binding.rebind('127.0.0.1');
               udp.close();
             } finally {
               child.kill();

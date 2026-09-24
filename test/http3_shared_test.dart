@@ -5,6 +5,8 @@ import 'dart:isolate';
 import 'package:server_native/server_native.dart';
 import 'package:test/test.dart';
 
+import 'support/udp_binding_probe.dart';
+
 Future<void> listener((SendPort, String, int, bool) args) async {
   final (parent, name, port, direct) = args;
   final commands = ReceivePort();
@@ -69,6 +71,7 @@ void main() {
             expect(one.current, isA<(int, SendPort)>());
             final (port, stop) = one.current as (int, SendPort);
             stopOne = stop;
+            final binding = UdpBindingProbe.capture(port);
             await start((second.sendPort, 'two', port, true));
             expect(await two.moveNext(), isTrue);
             expect(two.current, isA<(int, SendPort)>());
@@ -91,7 +94,7 @@ void main() {
             expect(one.current, 'closed');
             expect(await two.moveNext(), isTrue);
             expect(two.current, 'closed');
-            final rebound = await RawDatagramSocket.bind('127.0.0.1', port);
+            final rebound = await binding.rebind('127.0.0.1');
             rebound.close();
           } finally {
             stopOne?.send(null);

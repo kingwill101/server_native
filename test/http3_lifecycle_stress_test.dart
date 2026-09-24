@@ -4,10 +4,19 @@ import 'dart:io';
 import 'package:server_native/server_native.dart';
 import 'package:test/test.dart';
 
+import 'support/udp_binding_probe.dart';
+
 // Run separately from other test files: descriptor counts are process-wide.
 void main() {
   final python = Platform.environment['AIOQUIC_PYTHON'];
   final rounds = int.parse(Platform.environment['HTTP3_STRESS_ROUNDS'] ?? '16');
+  final maxRssGrowth =
+      int.parse(
+        Platform.environment['HTTP3_STRESS_MAX_RSS_GROWTH_MB'] ?? '32',
+      ) *
+      1024 *
+      1024;
+  if (rounds < 8) throw ArgumentError('HTTP3_STRESS_ROUNDS must be at least 8');
   for (final direct in [false, true]) {
     test(
       'HTTP/3 repeated startup/traffic/reset/close direct=$direct',
@@ -21,6 +30,7 @@ void main() {
             nativeCallback: direct,
             http3: true,
           );
+          final binding = UdpBindingProbe.capture(server.port);
           server.listen((request) async {
             try {
               await request.response.addStream(request);
@@ -45,23 +55,44 @@ void main() {
           } finally {
             await server.close(force: true);
           }
-          final rebound = await RawDatagramSocket.bind(
-            '127.0.0.1',
-            server.port,
-          );
+          final rebound = await binding.rebind('127.0.0.1');
+          final closed = rebound.drain<void>();
           rebound.close();
+          await closed;
         }
 
         // Warm up lazy native/Dart process resources before comparing descriptors.
-        await cycle();
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-        final descriptors = Directory('/proc/self/fd');
-        final before = descriptors.listSync().length;
-        for (var round = 0; round < rounds; round++) {
+        for (var warmup = 0; warmup < 4; warmup++) {
           await cycle();
         }
         await Future<void>.delayed(const Duration(milliseconds: 100));
+        final descriptors = Directory('/proc/self/fd');
+        final before = descriptors.listSync().length;
+        final rss = <int>[];
+        for (var round = 0; round < rounds; round++) {
+          await cycle();
+          rss.add(ProcessInfo.currentRss);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
         final after = descriptors.listSync().length;
+        // Compare low-water marks over windows, not arbitrary GC phases.
+        // This is a regression envelope for this workload, not a universal RSS cap.
+        final window = rounds < 16 ? 4 : 8;
+        final initialRss = rss.take(window).reduce((a, b) => a < b ? a : b);
+        final finalRss = rss
+            .skip(rss.length - window)
+            .reduce((a, b) => a < b ? a : b);
+        final peakRss = rss.reduce((a, b) => a > b ? a : b);
+        print(
+          'HTTP/3 resource direct=$direct rounds=$rounds '
+          'fds=$before->$after rss=$initialRss->$finalRss peak=$peakRss',
+        );
+        expect(
+          finalRss - initialRss,
+          lessThanOrEqualTo(maxRssGrowth),
+          reason:
+              'resident-memory low-water mark grew beyond the workload budget',
+        );
         expect(
           after,
           lessThanOrEqualTo(before + 2),
