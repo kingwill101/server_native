@@ -99,10 +99,7 @@ void main() {
       final message = await port.first.timeout(const Duration(seconds: 2));
       final values = message as List<Object?>;
       expect(values[0], 91);
-      expect(
-        values[1],
-        Uint8List.fromList(_expectedTokenizedRequestStart),
-      );
+      expect(values[1], Uint8List.fromList(_expectedTokenizedRequestStart));
     });
 
     test('rejects invalid queue capacities', () {
