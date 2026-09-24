@@ -214,8 +214,8 @@ const Writer = struct {
 
     fn putU16(self: *Writer, value: u16) Error!void {
         try self.ensure(2);
-        self.bytes[self.offset] = @intCast(value >> 8);
-        self.bytes[self.offset + 1] = @intCast(value);
+        self.bytes[self.offset] = @intCast((value >> 8) & 0xff);
+        self.bytes[self.offset + 1] = @intCast(value & 0xff);
         self.offset += 2;
     }
 
@@ -314,10 +314,10 @@ fn asciiEqualIgnoreCase(left: []const u8, right: []const u8) bool {
 }
 
 fn writeU32(out: []u8, value: u32) void {
-    out[0] = @intCast(value >> 24);
-    out[1] = @intCast(value >> 16);
-    out[2] = @intCast(value >> 8);
-    out[3] = @intCast(value);
+    out[0] = @intCast((value >> 24) & 0xff);
+    out[1] = @intCast((value >> 16) & 0xff);
+    out[2] = @intCast((value >> 8) & 0xff);
+    out[3] = @intCast(value & 0xff);
 }
 
 fn readU32(input: []const u8) u32 {
