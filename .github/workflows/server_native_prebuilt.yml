@@ -217,28 +217,75 @@ jobs:
           path: ${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}.tar.gz
 
   zig-native:
-    name: Zig Linux x64 (verified separately)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Zig ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
     steps:
       - uses: actions/checkout@v4
-
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
-
+      - uses: dtolnay/rust-toolchain@stable
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
-      - name: Build and test Zig asset
+      - name: Build and test Zig asset on its native architecture
         working-directory: zig
         run: |
-          set -euxo pipefail
           zig build -Doptimize=ReleaseSafe
-          zig build test
+          zig build test -Doptimize=ReleaseSafe
 
-      - name: Package Zig asset and checksum manifest
+      - name: Install independent QUIC client
+        run: |
+          dart pub get
+          python3 -m venv "$RUNNER_TEMP/aioquic"
+          "$RUNNER_TEMP/aioquic/bin/pip" install aioquic==1.3.0
+          echo "AIOQUIC_PYTHON=$RUNNER_TEMP/aioquic/bin/python" >> "$GITHUB_ENV"
+
+      - name: Validate Zig Dart integration on its native architecture
+        env:
+          SERVER_NATIVE_BACKEND: zig
+        run: |
+          dart test test/bridge_concurrency_test.dart test/sdk_http_server_compat_test.dart test/serve_ffi_http_test.dart test/serve_ffi_direct_test.dart test/zig_dart_api_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart test/http3_shared_test.dart test/http3_backpressure_test.dart test/http3_shutdown_test.dart
+          dart test test/http3_runtime_test.dart -n 'aioquic|streaming|loss|address-validation|rebinding|drain-replay'
+
+      - name: Stage verified build
+        run: |
+          mkdir -p ".dart_tool/zig-built/${{ matrix.platform }}"
+          cp zig/zig-out/lib/libserver_native_zig.so ".dart_tool/zig-built/${{ matrix.platform }}/"
+
+      - name: Upload architecture build
+        uses: actions/upload-artifact@v4
+        with:
+          name: server_native-zig-built-${{ matrix.platform }}
+          path: .dart_tool/zig-built/
+          include-hidden-files: true
+
+  zig-package:
+    name: Package verified Zig libraries
+    needs: zig-native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server_native-zig-built-*
+          merge-multiple: true
+          path: .dart_tool/zig-built
+
+      - name: Generate and verify combined Zig manifest
         shell: bash
         run: |
           set -euxo pipefail
@@ -251,8 +298,13 @@ jobs:
             release_tag="server-native-prebuilt-v$(awk '/^version:/{print $2; exit}' pubspec.yaml)"
           fi
           dart run native_prebuilt manifest update \
-            --config zig_prebuilt.yaml --tag "$release_tag" \
-            --built-library-dir zig/zig-out/lib \
+            --config zig_prebuilt.yaml --tag "$release_tag" --strict \
+            --built-library-dir .dart_tool/zig-built \
+            --release-assets-dir .dart_tool/zig-release-assets \
+            --output .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart
+          dart run native_prebuilt manifest verify \
+            --config zig_prebuilt.yaml --tag "$release_tag" --strict \
+            --built-library-dir .dart_tool/zig-built \
             --release-assets-dir .dart_tool/zig-release-assets \
             --output .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart
           cd .dart_tool/zig-release-assets
@@ -260,16 +312,17 @@ jobs:
         env:
           REQUESTED_TAG: ${{ inputs.tag }}
 
-      - name: Upload Zig asset and verification metadata
+      - name: Upload Zig assets and verification metadata
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PREBUILT_PACKAGE }}-zig-linux-x64
+          name: server_native-zig-release
           path: .dart_tool/zig-release-assets/*
+          include-hidden-files: true
 
   release:
     name: Create Release
     if: startsWith(github.ref, 'refs/tags/server-native-prebuilt-v') || github.event_name == 'workflow_dispatch'
-    needs: [native, zig-native]
+    needs: [native, zig-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

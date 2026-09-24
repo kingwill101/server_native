@@ -17,8 +17,8 @@ zig build test
 ```
 
 The build makes the libraries and C headers available to the Zig runtime.
-HTTP/2 runtime integration and TLS HTTP/1 support are implemented. An initial
-HTTP/3 UDP listener is integrated; its production milestone remains open. Unused archive members can be omitted by
+HTTP/2 runtime integration and TLS HTTP/1 support are implemented. The HTTP/3 UDP runtime now passes its Linux interoperability, streaming,
+shutdown, and resource regression gates. Unused archive members can be omitted by
 the linker until the runtime references them. To prefetch every
 pinned dependency, including AWS-LC, use `zig build --fetch=all`.
 
@@ -51,9 +51,10 @@ static archive so static consumers do not need separate protocol/TLS archives.
 Static consumers still need the target C/C++ runtime libraries.
 
 BoringSSL is the integrated build provider. AWS-LC is not linked into the
-normal build. The target matrix has not
-yet been validated beyond Linux x86_64; in particular the upstream BoringSSL
-wrapper's Windows limitations still apply. Keep each library's license with
+normal build. Linux x86_64 builds and runtime tests pass; Linux ARM64 also
+cross-builds in ReleaseSafe, with native runtime tests configured in release CI
+but not yet executed there. Other targets remain unvalidated; in particular
+the upstream BoringSSL wrapper's Windows limitations still apply. Keep each library's license with
 redistributed source or binary artifacts.
 
 ## Internal Zig adapters
@@ -295,37 +296,51 @@ are not joined into this registry.
 `http3_lifecycle_stress_test.dart` repeatedly starts a listener, runs eight
 concurrent independent clients with uploads and incomplete-stream cancellation,
 closes the listener, and rebinds UDP. On Linux it compares descriptor counts
-after warm-up and sixteen cycles per backend mode. Native teardown also asserts
-that all budgeted allocations have been returned. Run it separately, because
-file-descriptor counts are process-wide:
+after four warm-up cycles. The default is sixteen measured cycles per mode;
+CI runs sixty-four. Whole-process RSS low-water marks over the first and last
+eight samples must grow by at most 32 MiB. This includes resident native TLS and
+Dart memory, but is a regression envelope for this workload, not a universal
+memory ceiling or a proof that every allocation is bounded. Native teardown
+also asserts that all budgeted allocations have been returned. Run this gate
+separately because descriptor counts and RSS are process-wide:
 
 ```sh
-AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_lifecycle_stress_test.dart --concurrency=1
+HTTP3_STRESS_ROUNDS=64 AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_lifecycle_stress_test.dart --concurrency=1
 ```
 
-Set `HTTP3_STRESS_ROUNDS` for longer runs. These checks do not establish whole-
-process memory stability under sustained production load: BoringSSL, kernel,
-and Dart application allocations remain outside the native allocator accounting.
-The HTTP/3 CI command runs test files serially; each file still exercises
-concurrent clients and streams. A parallel local suite, run alongside a native
-ReleaseSafe dependency rebuild, intermittently observed `EADDRINUSE` on immediate
-UDP rebinding. The socket was gone by inspection, and targeted/serial runs and
-standalone Dart/libc probes did not reproduce it. This remains an unresolved
-load-related validation case, not a proven native leak or a completed gate.
-**Step 11 remains open** for sustained-load and parallel rebind validation.
+`HTTP3_STRESS_MAX_RSS_GROWTH_MB` controls the workload's RSS growth threshold.
+A local 64-cycle run kept descriptors at 19 in both modes. Bridge RSS low-water
+marks grew from 188,403,712 to 197,390,336 bytes; direct marks decreased from
+198,250,496 to 196,423,680 bytes. Kernel memory is not covered by process RSS,
+and these results do not establish behavior under every production workload.
+
+Parallel UDP rebind failures were traced to concurrent fork/exec: a child
+retained the close-on-exec UDP descriptor briefly after the server closed its
+own copy. In one syscall trace the rebind failed 1 ms after the parent closed
+and the child's exec completed 4 ms later. A standalone Dart/libc worker-isolate
+probe reproduced the race without this library. `UdpBindingProbe` snapshots
+owned UDP socket inodes and asserts their release before every rebind attempt;
+only Linux EADDRINUSE may retry, for at most two seconds. A live-descriptor
+regression test ensures this does not conceal native leaks. Parallel HTTP/3
+CI execution is restored. Concurrent bridge startup also uses atomically
+created temporary directories, avoiding timestamp collisions and accidental
+unlinking of another isolate's Unix socket.
 
 ## Zig prebuilt release gate
 
-`zig_prebuilt.yaml` describes the separate Linux x64 artifact. The build hook
-uses its generated manifest with checksum verification and Zig source fallback.
-The checked-in manifest intentionally has no artifacts until an actual release
-has been verified; it does not invent hashes or reuse Rust artifact hashes.
-The release workflow packages the Zig library with `native_prebuilt`, generates
-archive/payload checksums and a Dart manifest, and uploads that metadata alongside
-the archive. Import the verified release manifest into
+`zig_prebuilt.yaml` describes separate Linux x64 and ARM64 artifacts. The build
+hook uses its generated manifest with checksum verification and Zig source
+fallback. The checked-in manifest intentionally has no artifacts until an actual
+release has been verified; it does not invent hashes or reuse Rust hashes.
+The release workflow builds and tests each library on its native architecture,
+then packages both platform directories with `native_prebuilt --strict` into a
+combined manifest with archive/payload checksums. The manifest and checksums
+are uploaded alongside the archives. Linux ARM64 cross-compilation and local
+two-architecture packaging have been verified; native ARM64 workflow execution
+remains a release gate. Import the verified release manifest into
 `lib/src/generated/server_native_zig_prebuilts.g.dart` before enabling release
-artifact selection. Other targets and published-archive consumer tests remain
-release gates. Local source checkouts always compile current sources.
+artifact selection. macOS, Windows, Android, iOS, and published-archive consumer
+tests remain release gates. Local source checkouts always compile current sources.
 
 Regenerate internal ABI bindings with `python3 tool/generate_zig_bindings.py`.
 It derives signatures from `src/lib.zig` and invokes the toolchain generator;

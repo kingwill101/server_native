@@ -62,7 +62,7 @@ Initial scan found:
 - [x] Milestone 1 / HTTP/1: implement Zig TCP/Unix listeners and HTTP/1 parsing/writing, starting with `/health`, then parity for bridge/direct modes, keep-alive, chunked bodies, WebSocket upgrades, graceful shutdown, IPv6/shared binding, and TLS HTTP/1.
 - [x] Gate HTTP/1 on the existing Dart/framework suites, direct/bridge differential tests, curl interoperability, and shutdown stress tests.
 - [x] Milestone 2 / HTTP/2: integrate `nghttp2` through Zig C interop, add TLS/ALPN, map streams to the shared frame model, implement flow-control backpressure, cancellation, and concurrent streams, then validate with curl and `h2spec`.
-- [ ] Milestone 3 / HTTP/3: integrate `ngtcp2` + `nghttp3` with the selected QUIC-capable TLS provider, add Alt-Svc, UDP lifecycle, stream reset, graceful close, and independent curl/QUIC interoperability tests.
+- [x] Milestone 3 / HTTP/3: integrate `ngtcp2` + `nghttp3` with the selected QUIC-capable TLS provider, add Alt-Svc, UDP lifecycle, stream reset, graceful close, and independent curl/QUIC interoperability tests.
   - [x] Initial UDP/ngtcp2/BoringSSL/nghttp3 runtime, shared bridge/direct requests, Alt-Svc, curl and independent aioquic interoperability.
   - [x] Deterministic bidirectional loss/delay/duplication, lost close recovery, and silent draining replay gates.
   - [x] Retain closing/draining connection IDs for three PTOs with bounded close replies and no deadline extension.
@@ -73,8 +73,13 @@ Initial scan found:
   - [x] IPv6-only/dual-stack UDP binding and release, with TCP `v6Only` behavior checked against dart:io.
   - [x] Shared UDP connection-ID routing across listeners/isolates, independent shutdown, rebinding, and retained close state.
   - [x] Repeated listener startup, concurrent uploads, stream cancellation, shutdown, UDP rebind, and Linux descriptor accounting.
-  - [ ] Sustained-load resource validation including TLS/Dart allocations outside native budgets, and investigation of immediate UDP rebind failures observed during parallel tests plus native compilation.
+  - [x] Linux resource regression gate: 64 traffic/reset/shutdown cycles per mode after warm-up, stable descriptors and bounded whole-process RSS growth. This is a finite workload envelope, not a universal memory ceiling.
+  - [x] Resolve parallel UDP rebind failures: verify native socket inode release, allow the measured fork-to-exec inherited-descriptor window, and restore parallel protocol tests.
+  - [x] Isolate bridge Unix socket namespaces atomically so concurrent listener startup/cleanup cannot unlink a peer.
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
+  - [x] Linux x64 and ARM64 artifact packaging with a combined strict checksum manifest; local ARM64 ReleaseSafe cross-build verified.
+  - [ ] Native ARM64 CI execution and published-archive consumer validation.
+  - [ ] macOS, Windows, Android, and iOS Zig build/runtime artifacts.
 - [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
 
 ## Verification

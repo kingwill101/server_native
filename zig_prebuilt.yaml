@@ -13,3 +13,7 @@ artifacts:
     archive: server_native-zig-linux-x64.tar.gz
     payload:
       type: dynamic_library
+  linux-arm64:
+    archive: server_native-zig-linux-arm64.tar.gz
+    payload:
+      type: dynamic_library
