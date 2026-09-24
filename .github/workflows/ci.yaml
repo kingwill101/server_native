@@ -73,7 +73,10 @@ jobs:
           git diff --exit-code -- lib/src/zig_ffi.g.dart
 
       - name: Check changed Dart formatting
-        run: dart format --output=none --set-exit-if-changed hook/build.dart lib/src/zig_ffi.g.dart test/zig_dart_api_test.dart
+        run: |
+          dart format test/zig_dart_api_test.dart
+          git diff -- test/zig_dart_api_test.dart
+          dart format --output=none --set-exit-if-changed hook/build.dart lib/src/zig_ffi.g.dart test/zig_dart_api_test.dart
 
       - name: Analyze Dart sources
         run: dart analyze
