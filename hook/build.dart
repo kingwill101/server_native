@@ -6,6 +6,8 @@ import 'package:native_prebuilt/hooks.dart';
 import 'package:native_toolchain_rust/native_toolchain_rust.dart';
 import 'package:native_toolchain_zig/native_toolchain_zig.dart';
 import 'package:server_native/src/generated/server_native_prebuilts.g.dart';
+import 'package:server_native/src/generated/server_native_zig_prebuilts.g.dart'
+    as zig_prebuilt;
 
 const _assetName = 'src/ffi.g.dart';
 const _cratePath = 'native';
@@ -37,11 +39,27 @@ Future<void> main(List<String> args) async {
       ),
     ).run(input: input, output: output, logger: null);
 
-    await const ZigBuilder(
+    await PrebuiltCodeAssetBuilder(
       assetName: _zigAssetName,
-      zigDir: 'zig',
-      libraryName: _zigLibraryName,
-    ).run(input: input, output: output);
+      libraryStem: _zigLibraryName,
+      manifest: zig_prebuilt.server_nativePrebuilts,
+      linkModeResolver: (_) => DynamicLoadingBundled(),
+      resolvers: _isSourceCheckout(input.packageRoot)
+          ? const <PrebuiltResolver>[]
+          : null,
+      sourceFallback: SourceFallback(
+        sources: const [
+          LocalSource(paths: <String>['.']),
+        ],
+        builder: HookBuilderSourceBuilder.factory(
+          (_, _) => const ZigBuilder(
+            assetName: _zigAssetName,
+            zigDir: 'zig',
+            libraryName: _zigLibraryName,
+          ),
+        ),
+      ),
+    ).run(input: input, output: output, logger: null);
   });
 }
 

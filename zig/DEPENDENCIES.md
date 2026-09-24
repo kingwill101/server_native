@@ -58,9 +58,9 @@ redistributed source or binary artifacts.
 
 ## Internal Zig adapters
 
-`src/lib.zig` exposes `http2` and `http3` to Zig code only. No new C exports,
-Dart bindings, or Dart configuration options are added, and the existing
-listener dispatches HTTP/2 connections to the internal session adapter.
+`src/lib.zig` exposes `http2` and `http3` to Zig code only. Internal C exports
+coordinate asynchronous shutdown; the public Dart protocol API is unchanged.
+The existing listener dispatches HTTP/2 connections to the internal session adapter.
 For TLS listeners with the existing `http3` option enabled, `proxy_http3.zig`
 binds UDP on the same port and drives the internal HTTP/3 adapter.
 
@@ -70,9 +70,9 @@ serializes output, copies finite response bodies into bounded storage, and
 supports stream reset and GOAWAY. The application explicitly calls `consume`
 after consuming request DATA to return flow-control credit. Sink callbacks must
 copy retained data and must not reenter the session. Sink failure terminates
-the connection; it is not a queue-full retry mechanism. The future transport
-must pause socket reads when its bounded event queue is full. Response bodies
-are currently submitted whole, not as asynchronous streaming producers.
+the connection; it is not a queue-full retry mechanism. Runtime producers defer
+response DATA until Dart supplies more chunks, and resume the affected stream
+without blocking other streams.
 
 `http3.Connection` wraps an nghttp3 server connection, validates server control
 stream IDs, accepts stream bytes, exposes output vectors, and tracks bytes
@@ -172,9 +172,11 @@ Rust retains its existing polling fallback.
 
 `test/http2_concurrency_test.dart` holds a Dart handler open while checking a
 second stream, PING, cancellation, and a late response in bridge/direct modes
-over cleartext and TLS. It does not require h2spec. Request bodies are still
-buffered before dispatch (32 MiB limit); responses are buffered (4 MiB limit).
-Streaming body parity and broader memory/backpressure limits need further work.
+over cleartext and TLS. It does not require h2spec. `http2_streaming_test.dart`
+checks progressive 5 MiB echoes in all four modes. Headers dispatch before upload
+EOF, and DATA credit returns when a chunk enters the native event queue or bridge
+socket. This is transport handoff, not acknowledgement of application consumption;
+end-to-end consumption credits and aggregate memory budgets remain unfinished.
 
 ## HTTP/3 runtime status
 
@@ -188,16 +190,21 @@ connections after 30 seconds. Active migration is disabled in transport
 parameters. HTTP/1 and HTTP/2 advertise a live listener through Alt-Svc.
 
 HTTP/2 and HTTP/3 share `proxy_request.zig`, preserving the frame codec and
-asynchronous bridge/direct handler progress. Requests remain buffered up to
-32 MiB and responses up to 4 MiB. These are per-stream limits, not a global
-memory budget.
+asynchronous bridge/direct handler progress. Requests and responses stream
+incrementally. The aioquic streaming gate echoes 6 MiB in segments, waiting for
+each response segment before sending the next upload segment, without upload FIN.
+QUIC response chunks retain stable storage until nghttp3 reports acknowledgement.
+Response draining pauses at a 256 KiB transport watermark; one incoming frame
+can exceed that watermark. The 32 MiB request buffer and 4 MiB response frame
+limits are not an aggregate memory budget, and Dart response queues still need
+end-to-end backpressure.
 
 Run the independent client gate explicitly (Python dependency is test-only):
 
 ```sh
 python3 -m venv /tmp/server-native-quic-client
 /tmp/server-native-quic-client/bin/pip install aioquic==1.3.0
-AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart
+AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart
 ```
 
 Curl must support HTTP/3. The aioquic cases are reported as skipped when
@@ -224,9 +231,32 @@ queue is full, cleanup retries without blocking the UDP thread and retains the
 request even after the protocol retention deadline until that frame is queued.
 Forced listener shutdown can still release all retained state immediately.
 
+Graceful HTTP/3 shutdown sends a notice, waits at least two measured RTTs,
+then sends final GOAWAY and rejects new streams. A two-second listener deadline
+forces close even when cancellation events cannot enter a full Dart queue.
+Dart keeps processing handlers while polling completion asynchronously and joins
+native teardown on a worker isolate. Forced shutdown skips the grace period.
+`http3_shutdown_test.dart` verifies both GOAWAY frames, a blackholed path, and
+Dart timer progress during close in bridge and direct modes.
+
 **Step 11 remains open.** Remaining production gates include migration-disabled
-path tests, staged HTTP/3 GOAWAY and graceful application shutdown,
-address-validation/Retry policy, aggregate memory/backpressure budgets, full
-streaming bodies, IPv6/shared UDP routing, and sustained lifecycle/resource
-stress. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
+path tests, address-validation/Retry policy, aggregate memory/backpressure budgets,
+IPv6/shared UDP routing, and sustained lifecycle/resource stress. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
 socket, so it releases retained connections immediately.
+
+## Zig prebuilt release gate
+
+`zig_prebuilt.yaml` describes the separate Linux x64 artifact. The build hook
+uses its generated manifest with checksum verification and Zig source fallback.
+The checked-in manifest intentionally has no artifacts until an actual release
+has been verified; it does not invent hashes or reuse Rust artifact hashes.
+The release workflow packages the Zig library with `native_prebuilt`, generates
+archive/payload checksums and a Dart manifest, and uploads that metadata alongside
+the archive. Import the verified release manifest into
+`lib/src/generated/server_native_zig_prebuilts.g.dart` before enabling release
+artifact selection. Other targets and published-archive consumer tests remain
+release gates. Local source checkouts always compile current sources.
+
+Regenerate internal ABI bindings with `python3 tool/generate_zig_bindings.py`.
+It derives signatures from `src/lib.zig` and invokes the toolchain generator;
+protocol C headers are not needed for ABI discovery.

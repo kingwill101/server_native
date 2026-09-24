@@ -35,7 +35,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,3 +71,14 @@ jobs:
         run: |
           dart test test/serve_ffi_test.dart \
             --plain-name "serveSecureNative serves HTTP/3 requests when enabled"
+
+      - name: Install independent QUIC client
+        run: |
+          python3 -m venv "$RUNNER_TEMP/aioquic"
+          "$RUNNER_TEMP/aioquic/bin/pip" install aioquic==1.3.0
+          echo "AIOQUIC_PYTHON=$RUNNER_TEMP/aioquic/bin/python" >> "$GITHUB_ENV"
+
+      - name: Run Zig HTTP/3 interoperability and streaming gates
+        env:
+          SERVER_NATIVE_BACKEND: zig
+        run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart

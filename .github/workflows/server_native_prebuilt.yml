@@ -216,10 +216,60 @@ jobs:
           name: ${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}
           path: ${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}.tar.gz
 
+  zig-native:
+    name: Zig Linux x64 (verified separately)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build and test Zig asset
+        working-directory: zig
+        run: |
+          set -euxo pipefail
+          zig build -Doptimize=ReleaseSafe
+          zig build test
+
+      - name: Package Zig asset and checksum manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dart pub get
+          if [[ "$GITHUB_REF" == refs/tags/server-native-prebuilt-v* ]]; then
+            release_tag="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "$REQUESTED_TAG" ]]; then
+            release_tag="$REQUESTED_TAG"
+          else
+            release_tag="server-native-prebuilt-v$(awk '/^version:/{print $2; exit}' pubspec.yaml)"
+          fi
+          dart run native_prebuilt manifest update \
+            --config zig_prebuilt.yaml --tag "$release_tag" \
+            --built-library-dir zig/zig-out/lib \
+            --release-assets-dir .dart_tool/zig-release-assets \
+            --output .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart
+          cd .dart_tool/zig-release-assets
+          sha256sum *.tar.gz > SHA256SUMS-zig.txt
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+
+      - name: Upload Zig asset and verification metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PREBUILT_PACKAGE }}-zig-linux-x64
+          path: .dart_tool/zig-release-assets/*
+
   release:
     name: Create Release
     if: startsWith(github.ref, 'refs/tags/server-native-prebuilt-v') || github.event_name == 'workflow_dispatch'
-    needs: [native]
+    needs: [native, zig-native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -256,4 +306,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/server_native_zig_prebuilts.g.dart
+            artifacts/**/SHA256SUMS-zig.txt

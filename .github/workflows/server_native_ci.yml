@@ -31,7 +31,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -48,12 +48,24 @@ jobs:
         working-directory: native
         run: cargo test --all-targets
 
-      - name: Run server_native Dart tests
+      - name: Run Rust-default Dart tests
         working-directory: .
+        env:
+          SERVER_NATIVE_BACKEND: rust
         run: |
           dart test test/serve_ffi_http_test.dart
           dart test test/native_proxy_failure_test.dart
           dart test test/serve_ffi_test.dart -n "HTTP/2 prior|HTTP/3"
+
+      - name: Run Zig backend parity tests
+        working-directory: .
+        env:
+          SERVER_NATIVE_BACKEND: zig
+        run: |
+          dart test test/serve_ffi_http_test.dart
+          dart test test/native_proxy_failure_test.dart
+          dart test test/zig_dart_api_test.dart
+          dart test test/sdk_http_server_compat_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart
 
       - name: Check generated FFI bindings are up to date
         working-directory: .

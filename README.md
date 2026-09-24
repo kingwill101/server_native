@@ -19,7 +19,9 @@ Rust remains the default transport. Select the experimental Zig backend with
 `SERVER_NATIVE_BACKEND=zig`. Zig serves HTTP/1.1 (including TLS), HTTP/2,
 and an initial HTTP/3 UDP/QUIC runtime through the existing Dart API.
 HTTP/3 has curl and independent aioquic interoperability tests, but its production
-milestone remains open. See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
+milestone remains open. Rust remains the release/default backend until all HTTP/3
+streaming, shutdown, memory, and cross-target gates pass. See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
+Zig Linux x64 packaging is configured separately in `zig_prebuilt.yaml`. The hook falls back to source until a verified release manifest is imported; Rust prebuilts remain separate.
 
 ## Table Of Contents
 

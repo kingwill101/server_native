@@ -10,6 +10,7 @@ on:
       - "native/**"
       - "pubspec.yaml"
       - "test/**"
+      - "tool/**"
       - "zig/**"
   pull_request:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - "native/**"
       - "pubspec.yaml"
       - "test/**"
+      - "tool/**"
       - "zig/**"
   workflow_dispatch:
 
@@ -31,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig-version: [0.15.2, 0.16.0]
+        zig-version: [0.16.0]
 
     steps:
       - uses: actions/checkout@v4
@@ -62,14 +64,7 @@ jobs:
 
       - name: Regenerate and verify Zig bindings
         run: |
-          dart run native_toolchain_zig:zig bindings \
-            --package-root . \
-            --zig-dir zig \
-            --root-source-file src/lib.zig \
-            --output lib/src/zig_ffi.g.dart \
-            --asset-id package:server_native/src/zig_ffi.g.dart \
-            --link-libc
-          dart format lib/src/zig_ffi.g.dart
+          python3 tool/generate_zig_bindings.py
           git diff --exit-code -- lib/src/zig_ffi.g.dart
 
       - name: Check changed Dart formatting
@@ -78,8 +73,11 @@ jobs:
       - name: Analyze Dart sources
         run: dart analyze
 
-      - name: Run Dart integration tests
+      - name: Run Zig backend Dart integration tests
+        env:
+          SERVER_NATIVE_BACKEND: zig
         run: |
           dart test test/serve_ffi_http_test.dart
           dart test test/native_proxy_failure_test.dart
           dart test test/zig_dart_api_test.dart
+          dart test test/sdk_http_server_compat_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart
