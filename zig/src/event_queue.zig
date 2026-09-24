@@ -24,20 +24,20 @@ pub const Queue = struct {
     queued_bytes: usize = 0,
     byte_limit: usize,
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) Error!Queue {
-        return initWithByteLimit(allocator, capacity, max_queued_bytes);
+    pub fn init(allocator: std.mem.Allocator, slot_capacity: usize) Error!Queue {
+        return initWithByteLimit(allocator, slot_capacity, max_queued_bytes);
     }
 
     fn initWithByteLimit(
         allocator: std.mem.Allocator,
-        capacity: usize,
+        slot_capacity: usize,
         byte_limit: usize,
     ) Error!Queue {
-        if (capacity == 0 or capacity > max_queue_slots or byte_limit == 0) {
+        if (slot_capacity == 0 or slot_capacity > max_queue_slots or byte_limit == 0) {
             return error.InvalidCapacity;
         }
 
-        const slots = allocator.alloc(?Event, capacity) catch {
+        const slots = allocator.alloc(?Event, slot_capacity) catch {
             return error.OutOfMemory;
         };
         for (slots) |*slot| slot.* = null;
