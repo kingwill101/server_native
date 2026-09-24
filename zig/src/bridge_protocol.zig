@@ -28,6 +28,7 @@ pub const Error = error{
     TruncatedPayload,
     UnexpectedFrameType,
     UnsupportedVersion,
+    OutOfMemory,
 };
 
 pub fn encodeWireFrame(payload: []const u8, out: []u8) Error![]const u8 {
@@ -132,9 +133,68 @@ const header_name_literal_token: u16 = 0xffff;
 const connection_header = "connection";
 const sanitized_connection_header = "x-server-native-connection";
 const empty_connection_sentinel = "__server_native_empty_connection__";
+const max_request_head_headers: u32 = 65536;
+pub const min_request_head_descriptor_bytes: usize = 28;
+
+/// Decodes the Dart-to-Zig request-head descriptor used by the queue FFI.
+///
+/// It contains six u32-BE-length-prefixed fields (method, scheme, authority,
+/// path, query, protocol), followed by a u32-BE header count and repeated
+/// length-prefixed name/value pairs. This input descriptor is distinct from
+/// the Rust-compatible tokenized bridge payload produced below.
+pub fn decodeRequestHeadDescriptor(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+) Error!RequestHead {
+    var reader = RequestHeadReader{ .bytes = input };
+    const method = try reader.readField();
+    const scheme = try reader.readField();
+    const authority = try reader.readField();
+    const path = try reader.readField();
+    const query = try reader.readField();
+    const protocol = try reader.readField();
+    const header_count = try reader.readU32Value();
+
+    if (header_count > max_request_head_headers) return error.FrameTooLarge;
+    const header_count_usize: usize = @intCast(header_count);
+    if (header_count_usize > (input.len -| reader.offset) / 8) {
+        return error.InvalidLength;
+    }
+    const headers = try allocator.alloc(Header, header_count_usize);
+    errdefer allocator.free(headers);
+    for (headers) |*header| {
+        header.* = .{
+            .name = try reader.readField(),
+            .value = try reader.readField(),
+        };
+    }
+    if (reader.offset != input.len) return error.InvalidLength;
+
+    return .{
+        .method = method,
+        .scheme = scheme,
+        .authority = authority,
+        .path = path,
+        .query = query,
+        .protocol = protocol,
+        .headers = headers,
+    };
+}
 
 pub fn encodeRequestStart(request: RequestHead, out: []u8) Error![]const u8 {
     var writer = Writer{ .bytes = out };
+    try writeRequestStart(request, &writer);
+    return out[0..writer.offset];
+}
+
+/// Returns the exact encoded size without allocating an output buffer.
+pub fn requestStartEncodedSize(request: RequestHead) Error!usize {
+    var writer = Writer{ .bytes = null };
+    try writeRequestStart(request, &writer);
+    return writer.offset;
+}
+
+fn writeRequestStart(request: RequestHead, writer: *Writer) Error!void {
     try writer.putU8(protocol_version);
     try writer.putU8(@intFromEnum(FrameType.request_start_tokenized));
     try writer.putBytes(request.method);
@@ -197,39 +257,66 @@ pub fn encodeRequestStart(request: RequestHead, out: []u8) Error![]const u8 {
         try writer.putBytes(header.value);
     }
 
-    writeU32(writer.bytes[count_position .. count_position + 4], header_count);
+    writer.patchU32(count_position, header_count);
     if (writer.offset > max_frame_bytes) return error.FrameTooLarge;
-    return writer.bytes[0..writer.offset];
 }
 
+const RequestHeadReader = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+
+    fn readU32Value(self: *RequestHeadReader) Error!u32 {
+        if (self.bytes.len -| self.offset < 4) return error.TruncatedPayload;
+        const value = readU32(self.bytes[self.offset .. self.offset + 4]);
+        self.offset += 4;
+        return value;
+    }
+
+    fn readField(self: *RequestHeadReader) Error![]const u8 {
+        const length: usize = @intCast(try self.readU32Value());
+        if (length > self.bytes.len -| self.offset) return error.TruncatedPayload;
+        const field = self.bytes[self.offset .. self.offset + length];
+        self.offset += length;
+        return field;
+    }
+};
+
 const Writer = struct {
-    bytes: []u8,
+    bytes: ?[]u8,
     offset: usize = 0,
 
     fn putU8(self: *Writer, value: u8) Error!void {
         try self.ensure(1);
-        self.bytes[self.offset] = value;
+        if (self.bytes) |bytes| bytes[self.offset] = value;
         self.offset += 1;
     }
 
     fn putU16(self: *Writer, value: u16) Error!void {
         try self.ensure(2);
-        self.bytes[self.offset] = @intCast((value >> 8) & 0xff);
-        self.bytes[self.offset + 1] = @intCast(value & 0xff);
+        if (self.bytes) |bytes| {
+            bytes[self.offset] = @intCast((value >> 8) & 0xff);
+            bytes[self.offset + 1] = @intCast(value & 0xff);
+        }
         self.offset += 2;
     }
 
     fn putU32(self: *Writer, value: u32) Error!void {
         try self.ensure(4);
-        writeU32(self.bytes[self.offset .. self.offset + 4], value);
+        if (self.bytes) |bytes| writeU32(bytes[self.offset .. self.offset + 4], value);
         self.offset += 4;
+    }
+
+    fn patchU32(self: *Writer, offset: usize, value: u32) void {
+        if (self.bytes) |bytes| writeU32(bytes[offset .. offset + 4], value);
     }
 
     fn putBytes(self: *Writer, value: []const u8) Error!void {
         if (value.len > std.math.maxInt(u32)) return error.FieldTooLarge;
         try self.putU32(@intCast(value.len));
         try self.ensure(value.len);
-        @memcpy(self.bytes[self.offset .. self.offset + value.len], value);
+        if (self.bytes) |bytes| {
+            @memcpy(bytes[self.offset .. self.offset + value.len], value);
+        }
         self.offset += value.len;
     }
 
@@ -242,8 +329,13 @@ const Writer = struct {
     }
 
     fn ensure(self: *Writer, additional: usize) Error!void {
-        if (additional > self.bytes.len -| self.offset) {
-            return error.BufferTooSmall;
+        if (additional > max_frame_bytes -| self.offset) {
+            return error.FrameTooLarge;
+        }
+        if (self.bytes) |bytes| {
+            if (additional > bytes.len -| self.offset) {
+                return error.BufferTooSmall;
+            }
         }
     }
 };

@@ -52,6 +52,36 @@ export fn server_native_zig_queue_push(
     return true;
 }
 
+export fn server_native_zig_queue_push_request_start(
+    handle: *anyopaque,
+    request_id: i64,
+    descriptor: [*]const u8,
+    descriptor_len: usize,
+) bool {
+    const bridge_protocol = @import("bridge_protocol.zig");
+    if (descriptor_len < bridge_protocol.min_request_head_descriptor_bytes or
+        descriptor_len > bridge_protocol.max_frame_bytes)
+    {
+        return false;
+    }
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    const request = bridge_protocol.decodeRequestHeadDescriptor(
+        arena.allocator(),
+        descriptor[0..descriptor_len],
+    ) catch return false;
+    const payload_len = bridge_protocol.requestStartEncodedSize(request) catch return false;
+    const payload = std.heap.c_allocator.alloc(u8, payload_len) catch return false;
+    defer std.heap.c_allocator.free(payload);
+
+    const encoded = bridge_protocol.encodeRequestStart(request, payload) catch return false;
+    const event_queue = @import("event_queue.zig");
+    const queue: *event_queue.Queue = @ptrCast(@alignCast(handle));
+    queue.push(request_id, encoded) catch return false;
+    return true;
+}
+
 export fn server_native_zig_queue_length(handle: *anyopaque) usize {
     const event_queue = @import("event_queue.zig");
     const queue: *event_queue.Queue = @ptrCast(@alignCast(handle));

@@ -47,6 +47,21 @@ external bool server_native_zig_queue_push(
   int payload_len,
 );
 
+@ffi.Native<
+  ffi.Bool Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Int64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.UintPtr,
+  )
+>(symbol: 'server_native_zig_queue_push_request_start')
+external bool server_native_zig_queue_push_request_start(
+  ffi.Pointer<ffi.Void> handle,
+  int request_id,
+  ffi.Pointer<ffi.Uint8> descriptor,
+  int descriptor_len,
+);
+
 @ffi.Native<ffi.UintPtr Function(ffi.Pointer<ffi.Void>)>(
   symbol: 'server_native_zig_queue_length',
 )
