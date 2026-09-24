@@ -174,9 +174,14 @@ Rust retains its existing polling fallback.
 second stream, PING, cancellation, and a late response in bridge/direct modes
 over cleartext and TLS. It does not require h2spec. `http2_streaming_test.dart`
 checks progressive 5 MiB echoes in all four modes. Headers dispatch before upload
-EOF, and DATA credit returns when a chunk enters the native event queue or bridge
-socket. This is transport handoff, not acknowledgement of application consumption;
-end-to-end consumption credits and aggregate memory budgets remain unfinished.
+EOF. Direct-mode DATA credit returns when Dart delivers a chunk to the request
+stream listener (or discards input after its handler completes), with at most
+64 KiB outstanding per request. Bridge-mode credit follows socket handoff;
+pausing the Dart request stream pauses bridge reads and propagates socket pressure.
+Direct responses wait asynchronously for native queue capacity through API-DL
+notifications. Queue payloads are limited to 16 MiB per server and 256 KiB per
+stream, plus a single larger legacy frame on an otherwise empty stream. Frame
+counts are bounded independently, including empty frames.
 
 ## HTTP/3 runtime status
 
@@ -196,15 +201,26 @@ each response segment before sending the next upload segment, without upload FIN
 QUIC response chunks retain stable storage until nghttp3 reports acknowledgement.
 Response draining pauses at a 256 KiB transport watermark; one incoming frame
 can exceed that watermark. The 32 MiB request buffer and 4 MiB response frame
-limits are not an aggregate memory budget, and Dart response queues still need
-end-to-end backpressure.
+limits are supplemented by hierarchical allocation limits: 16 MiB per QUIC
+connection and 128 MiB per UDP listener. These cover Zig-owned peer/stream data
+and ngtcp2/nghttp3 heaps, including allocation metadata. Allocation failure
+terminates the affected protocol operation; release restores capacity. BoringSSL
+heaps, kernel socket buffers, and Dart application buffers are outside these
+limits. In particular, synchronous response `add` calls and automatic compression
+can still buffer in Dart; use awaited `addStream`/`flush` for producer pressure.
+
+`http3_backpressure_test.dart` fixes the independent client receive window,
+checks that a 32 MiB response producer stops making progress, cancels that stream,
+then pauses an 8 MiB upload at the Dart handler and checks that its wire offset
+stops increasing. Other streams must remain responsive, and the upload must
+finish after consumption resumes. Both bridge and direct modes are covered.
 
 Run the independent client gate explicitly (Python dependency is test-only):
 
 ```sh
 python3 -m venv /tmp/server-native-quic-client
 /tmp/server-native-quic-client/bin/pip install aioquic==1.3.0
-AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart
+AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart
 ```
 
 Curl must support HTTP/3. The aioquic cases are reported as skipped when
@@ -240,8 +256,8 @@ native teardown on a worker isolate. Forced shutdown skips the grace period.
 Dart timer progress during close in bridge and direct modes.
 
 **Step 11 remains open.** Remaining production gates include migration-disabled
-path tests, address-validation/Retry policy, aggregate memory/backpressure budgets,
-IPv6/shared UDP routing, and sustained lifecycle/resource stress. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
+path tests, address-validation/Retry policy, IPv6/shared UDP routing, and sustained
+lifecycle/resource stress, including allocations outside the native budgets. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
 socket, so it releases retained connections immediately.
 
 ## Zig prebuilt release gate

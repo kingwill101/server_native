@@ -105,7 +105,9 @@ fn decodeHeaders(allocator: std.mem.Allocator, frame: []const u8, offset: *usize
     if (count > 65536) return error.TooManyHeaders;
     for (0..count) |_| {
         const name = try readHeaderName(allocator, frame, offset);
+        errdefer allocator.free(name);
         const value = try allocator.dupe(u8, try readBytes(frame, offset));
+        errdefer allocator.free(value);
         try headers.append(allocator, .{ .name = name, .value = value });
     }
 }

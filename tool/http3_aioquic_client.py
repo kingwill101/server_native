@@ -167,6 +167,35 @@ async def streaming(client):
     del client.chunks[stream]
 
 
+async def pressure(client):
+    # Keep the initial advertised receive window fixed. aioquic normally grows
+    # it independently of application consumption; this simulates a slow reader.
+    client._quic._write_stream_limits = lambda *args, **kwargs: None
+    download, _ = client.request("/download")
+    async def received_window():
+        while len(client.bodies.get(download, b"")) < 30000:
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(received_window(), 5)
+    await asyncio.sleep(0.3)
+    before = int(await client.get("/progress"))
+    await asyncio.sleep(0.3)
+    after = int(await client.get("/progress"))
+    assert before == after, (before, after)
+    assert 0 < after < 4 * 1024 * 1024, after
+    assert await client.get("/fast") == b"fast"
+    client.cancel(download)
+
+    upload, done = client.request("/upload", b"u" * (8 * 1024 * 1024))
+    await asyncio.sleep(0.3)
+    sent = client._quic._streams[upload].sender.highest_offset
+    await asyncio.sleep(0.3)
+    later = client._quic._streams[upload].sender.highest_offset
+    assert sent == later and 0 < sent < 4 * 1024 * 1024, (sent, later)
+    assert await client.get("/fast") == b"fast"
+    assert await client.get("/release") == b"released"
+    assert await asyncio.wait_for(done, 15) == b"uploaded"
+
+
 async def exercise(client):
     assert await client.get("/echo?q=value", b"x" * 131072) == (
         b"POST /echo q=value " + b"x" * 131072
@@ -189,11 +218,15 @@ async def main(port, mode):
             lambda: Relay(port, mode == "loss"), local_addr=("127.0.0.1", 0))
         port = relay.transport.get_extra_info("sockname")[1]
     config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
+    if mode == "pressure":
+        config.max_stream_data = 32768
     config.verify_mode = ssl.CERT_NONE  # Local test certificate only.
     try:
         async with connect("127.0.0.1", port, configuration=config,
                            create_protocol=Client) as client:
-            if mode in ("shutdown", "shutdown-loss"):
+            if mode == "pressure":
+                await pressure(client)
+            elif mode in ("shutdown", "shutdown-loss"):
                 assert await client.get("/shutdown") == b"closing"
                 if relay:
                     relay.blackhole = True

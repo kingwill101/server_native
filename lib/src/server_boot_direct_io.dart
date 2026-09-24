@@ -2,12 +2,25 @@ part of 'server_boot.dart';
 
 /// Encodes and writes length-prefixed bridge frames to a socket.
 final class _BridgeSocketWriter {
-  _BridgeSocketWriter(this._socket);
+  _BridgeSocketWriter(this._socket) {
+    // Socket.done can fail independently of a flush waiter on peer reset.
+    unawaited(
+      _socket.done.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace _) {
+          _failed = true;
+        },
+      ),
+    );
+  }
+
+  bool _failed = false;
 
   final Socket _socket;
 
   /// Writes a full payload frame (`u32 length + payload`).
   void writeFrame(Uint8List payload) {
+    if (_failed) return;
     if (payload.length > _maxBridgeFrameBytes) {
       throw FormatException(
         'bridge response frame too large: ${payload.length}',
@@ -36,6 +49,7 @@ final class _BridgeSocketWriter {
 
   /// Writes a response frame using prefix/body split encoding.
   void writeResponseFrame(BridgeResponseFrame response) {
+    if (_failed) return;
     final body = response.bodyBytes;
     final prefix = response.encodePayloadPrefixWithoutBody();
     final payloadLength = prefix.length + body.length;
@@ -64,6 +78,7 @@ final class _BridgeSocketWriter {
 
   /// Writes one chunk frame with [frameType] and [chunkBytes].
   void writeChunkFrame(int frameType, Uint8List chunkBytes) {
+    if (_failed) return;
     final payloadLength = 6 + chunkBytes.length;
     if (payloadLength > _maxBridgeFrameBytes) {
       throw FormatException('bridge response frame too large: $payloadLength');
@@ -92,7 +107,15 @@ final class _BridgeSocketWriter {
     }
   }
 
-  Future<void> flush() => _socket.flush();
+  Future<void> flush() async {
+    if (_failed) return;
+    try {
+      await _socket.flush();
+    } on SocketException {
+      _failed = true;
+      _socket.destroy();
+    }
+  }
 
   /// Writes one chunk frame and flushes the socket immediately.
   Future<void> writeChunkFrameAndFlush(
@@ -100,7 +123,7 @@ final class _BridgeSocketWriter {
     Uint8List chunkBytes,
   ) async {
     writeChunkFrame(frameType, chunkBytes);
-    await _socket.flush();
+    await flush();
   }
 }
 

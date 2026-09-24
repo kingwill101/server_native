@@ -90,11 +90,11 @@ NativeProxyServer _startNativeDirectProxy({
       onSocketClosed?.call();
     }
 
-    void pushResponsePayload(Uint8List responsePayload) {
+    Future<void> pushResponsePayload(Uint8List responsePayload) async {
       if (proxyRef.isClosed) {
         return;
       }
-      final pushed = proxyRef.pushDirectResponseFrame(
+      final pushed = await proxyRef.pushDirectResponseFrameAsync(
         requestId,
         responsePayload,
       );
@@ -107,11 +107,11 @@ NativeProxyServer _startNativeDirectProxy({
 
     Future<void> forwardDetachedOutput(
       BridgeDetachedSocket detachedSocket, {
-      required void Function(Uint8List chunkBytes) emitChunk,
+      required Future<void> Function(Uint8List chunkBytes) emitChunk,
     }) async {
       final prefetched = detachedSocket.takePrefetchedTunnelBytes();
       if (prefetched != null && prefetched.isNotEmpty) {
-        emitChunk(prefetched);
+        await emitChunk(prefetched);
       }
       final bridgeIterator = detachedSocket.bridgeIterator();
       while (await bridgeIterator.moveNext()) {
@@ -119,7 +119,7 @@ NativeProxyServer _startNativeDirectProxy({
         if (chunk.isEmpty) {
           continue;
         }
-        emitChunk(chunk);
+        await emitChunk(chunk);
       }
     }
 
@@ -133,7 +133,7 @@ NativeProxyServer _startNativeDirectProxy({
         return;
       }
       if (!streamState.requestBody.isClosed) {
-        await streamState.requestBody.close();
+        unawaited(streamState.requestBody.close());
       }
       streamState.clearBufferedRequestChunks();
       if (closeDetachedSocket) {
@@ -155,7 +155,7 @@ NativeProxyServer _startNativeDirectProxy({
         stderr.writeln(
           '[server_native] native direct callback handler error: $error\n$stack',
         );
-        pushResponsePayload(_encodeDirectBadRequestPayload(error));
+        unawaited(pushResponsePayload(_encodeDirectBadRequestPayload(error)));
         return;
       }
       beginTrackedRequest();
@@ -189,11 +189,13 @@ NativeProxyServer _startNativeDirectProxy({
           unawaited(() async {
             try {
               if (usesTunnel) {
-                pushResponsePayload(BridgeResponseFrame.encodeEndPayload());
+                await pushResponsePayload(
+                  BridgeResponseFrame.encodeEndPayload(),
+                );
                 await forwardDetachedOutput(
                   detachedSocket,
-                  emitChunk: (chunk) {
-                    pushResponsePayload(
+                  emitChunk: (chunk) async {
+                    await pushResponsePayload(
                       BridgeTunnelFrame.encodeChunkPayload(chunk),
                     );
                   },
@@ -201,20 +203,24 @@ NativeProxyServer _startNativeDirectProxy({
               } else {
                 await forwardDetachedOutput(
                   detachedSocket,
-                  emitChunk: (chunk) {
-                    pushResponsePayload(
+                  emitChunk: (chunk) async {
+                    await pushResponsePayload(
                       BridgeResponseFrame.encodeChunkPayload(chunk),
                     );
                   },
                 );
-                pushResponsePayload(BridgeResponseFrame.encodeEndPayload());
+                await pushResponsePayload(
+                  BridgeResponseFrame.encodeEndPayload(),
+                );
               }
             } catch (_) {
               // Peer closure and write errors both end the tunnel.
             } finally {
               if (usesTunnel &&
                   identical(nativeDirectStreams[requestId], streamState)) {
-                pushResponsePayload(BridgeTunnelFrame.encodeClosePayload());
+                await pushResponsePayload(
+                  BridgeTunnelFrame.encodeClosePayload(),
+                );
                 await streamState.tunnelInputClosed.future;
               }
               await removeNativeDirectStream(
@@ -229,7 +235,10 @@ NativeProxyServer _startNativeDirectProxy({
         try {
           await handleStream(
             frame: startFrame,
-            bodyStream: requestBody.stream,
+            bodyStream: requestBody.stream.map((chunk) {
+              proxyRef.consumeDirectRequestBytes(requestId, chunk.length);
+              return chunk;
+            }),
             onDetachedSocket: (socket) {
               streamState.detachedSocket = socket;
               streamState.flushBufferedChunksToDetachedSocket();
@@ -242,23 +251,40 @@ NativeProxyServer _startNativeDirectProxy({
                   frame.status == HttpStatus.switchingProtocols;
               streamState.detachedSocket = frame.detachedSocket;
               streamState.flushBufferedChunksToDetachedSocket();
-              pushResponsePayload(frame.encodeStartPayload());
+              await pushResponsePayload(frame.encodeStartPayload());
               startDetachedForwardingIfNeeded();
             },
             onResponseChunk: (chunkBytes) async {
               if (chunkBytes.isEmpty) {
                 return;
               }
-              pushResponsePayload(
-                BridgeResponseFrame.encodeChunkPayload(chunkBytes),
-              );
+              for (
+                var offset = 0;
+                offset < chunkBytes.length;
+                offset += 16384
+              ) {
+                final end = offset + 16384 < chunkBytes.length
+                    ? offset + 16384
+                    : chunkBytes.length;
+                await pushResponsePayload(
+                  BridgeResponseFrame.encodeChunkPayload(
+                    Uint8List.sublistView(chunkBytes, offset, end),
+                  ),
+                );
+              }
             },
           );
           streamState.responseCompleted = true;
+          if (!requestBody.hasListener && streamState.detachedSocket == null) {
+            for (final chunk in streamState._pendingUnconsumedBodyChunks) {
+              proxyRef.consumeDirectRequestBytes(requestId, chunk.length);
+            }
+            streamState.clearBufferedRequestChunks();
+          }
           if (streamState.detachedSocket != null) {
             startDetachedForwardingIfNeeded();
           } else {
-            pushResponsePayload(BridgeResponseFrame.encodeEndPayload());
+            await pushResponsePayload(BridgeResponseFrame.encodeEndPayload());
             if (streamState.requestEnded) {
               await removeNativeDirectStream(
                 streamState: streamState,
@@ -271,8 +297,16 @@ NativeProxyServer _startNativeDirectProxy({
           stderr.writeln(
             '[server_native] native direct callback stream handler error: $error\n$stack',
           );
-          pushResponsePayload(_internalServerErrorFrame(error).encodePayload());
+          await pushResponsePayload(
+            _internalServerErrorFrame(error).encodePayload(),
+          );
           streamState.responseCompleted = true;
+          if (!requestBody.hasListener && streamState.detachedSocket == null) {
+            for (final chunk in streamState._pendingUnconsumedBodyChunks) {
+              proxyRef.consumeDirectRequestBytes(requestId, chunk.length);
+            }
+            streamState.clearBufferedRequestChunks();
+          }
           if (streamState.requestEnded && streamState.detachedSocket == null) {
             await removeNativeDirectStream(
               streamState: streamState,
@@ -304,6 +338,9 @@ NativeProxyServer _startNativeDirectProxy({
             final detachedSocket = streamState.detachedSocket;
             if (detachedSocket != null) {
               detachedSocket.bridgeSocket.add(chunk);
+            } else if (streamState.responseCompleted &&
+                !streamState.requestBody.hasListener) {
+              proxyRef.consumeDirectRequestBytes(requestId, chunk.length);
             } else {
               streamState.maybeBufferUnconsumedRequestChunk(chunk);
               streamState.requestBody.add(chunk);
@@ -407,12 +444,14 @@ NativeProxyServer _startNativeDirectProxy({
         final result = await directPayloadHandler(requestPayload);
         final responsePayload =
             result.encodedPayload ?? result.frame.encodePayload();
-        pushResponsePayload(responsePayload);
+        await pushResponsePayload(responsePayload);
       } catch (error, stack) {
         stderr.writeln(
           '[server_native] native direct callback handler error: $error\n$stack',
         );
-        pushResponsePayload(_internalServerErrorFrame(error).encodePayload());
+        await pushResponsePayload(
+          _internalServerErrorFrame(error).encodePayload(),
+        );
       } finally {
         endTrackedRequest();
       }

@@ -28,6 +28,9 @@ const Mutex = struct {
 
 const PendingResponse = struct {
     frames: std.ArrayListUnmanaged([]u8) = .empty,
+    bytes: usize = 0,
+    request_outstanding: usize = 0,
+    request_acked: usize = 0,
 };
 
 pub const ProxyServer = struct {
@@ -38,6 +41,11 @@ pub const ProxyServer = struct {
     active_connections: std.atomic.Value(u32) = .init(0),
     pending_mutex: Mutex = .{},
     pending: std.AutoHashMap(u64, PendingResponse),
+    pending_bytes: usize = 0,
+    pending_frames: usize = 0,
+    response_waiters: bool = false,
+    response_limit: usize = 16 * 1024 * 1024,
+    stream_response_limit: usize = 256 * 1024,
     listener: http1.Listener,
     accept_thread: ?std.Thread = null,
     port: u16,
@@ -260,27 +268,82 @@ pub const ProxyServer = struct {
     pub fn registerRequest(self: *ProxyServer, request_id: u64) bool {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
+        if (self.pending.count() >= 4096 or self.pending.contains(request_id)) return false;
         self.pending.put(request_id, .{}) catch return false;
         return true;
     }
 
+    pub const PushResult = enum(u8) { closed = 0, accepted = 1, full = 2 };
+
     pub fn pushResponse(self: *ProxyServer, request_id: u64, payload: [*]const u8, payload_len: u64) bool {
-        if (self.stopped.load(.acquire) or payload_len > event_queue.max_queued_bytes) {
-            return false;
-        }
+        return self.tryPushResponse(request_id, payload, payload_len) == .accepted;
+    }
+
+    pub fn tryPushResponse(self: *ProxyServer, request_id: u64, payload: [*]const u8, payload_len: u64) PushResult {
+        if (self.stopped.load(.acquire) or payload_len > 4 * 1024 * 1024 + 65536) return .closed;
         const length: usize = @intCast(payload_len);
-        const copy = self.allocator.dupe(u8, payload[0..length]) catch return false;
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        const response = self.pending.getPtr(request_id) orelse {
-            self.allocator.free(copy);
-            return false;
-        };
+        const response = self.pending.getPtr(request_id) orelse return .closed;
+        if (length > self.response_limit) return .closed;
+        // A finite legacy frame larger than the streaming watermark can occupy
+        // an otherwise empty stream queue, within the server-wide byte budget.
+        if (length > self.response_limit - self.pending_bytes or
+            (response.bytes != 0 and length > self.stream_response_limit -| response.bytes) or
+            response.frames.items.len >= 256 or self.pending_frames >= 4096)
+        {
+            self.response_waiters = true;
+            return .full;
+        }
+        const copy = self.allocator.dupe(u8, payload[0..length]) catch return .closed;
         response.frames.append(self.allocator, copy) catch {
             self.allocator.free(copy);
-            return false;
+            return .closed;
         };
+        response.bytes += length;
+        self.pending_bytes += length;
+        self.pending_frames += 1;
+        return .accepted;
+    }
+
+    fn wakeResponseProducers(self: *ProxyServer) void {
+        if (!self.response_waiters) return;
+        self.response_waiters = false;
+        notifyDart(self);
+    }
+
+    pub fn reserveRequestBytes(self: *ProxyServer, request_id: u64, count: usize) bool {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        const request = self.pending.getPtr(request_id) orelse return false;
+        if (count > 65536 -| request.request_outstanding) return false;
+        request.request_outstanding += count;
         return true;
+    }
+
+    pub fn refundRequestBytes(self: *ProxyServer, request_id: u64, count: usize) void {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        if (self.pending.getPtr(request_id)) |request| request.request_outstanding -= count;
+    }
+
+    pub fn consumeRequestBytes(self: *ProxyServer, request_id: u64, count: usize) void {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        if (self.pending.getPtr(request_id)) |request| {
+            const consumed = @min(count, request.request_outstanding);
+            request.request_outstanding -= consumed;
+            request.request_acked += consumed;
+        }
+    }
+
+    pub fn takeRequestCredit(self: *ProxyServer, request_id: u64) usize {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        const request = self.pending.getPtr(request_id) orelse return 0;
+        const count = request.request_acked;
+        request.request_acked = 0;
+        return count;
     }
 
     // The connection owns pending state until discardRequest, including after
@@ -290,7 +353,12 @@ pub const ProxyServer = struct {
         defer self.pending_mutex.unlock();
         const response = self.pending.getPtr(request_id) orelse return null;
         if (response.frames.items.len != 0) {
-            return response.frames.orderedRemove(0);
+            const frame = response.frames.orderedRemove(0);
+            response.bytes -= frame.len;
+            self.pending_bytes -= frame.len;
+            self.pending_frames -= 1;
+            self.wakeResponseProducers();
+            return frame;
         }
         return null;
     }
@@ -309,6 +377,9 @@ pub const ProxyServer = struct {
         defer self.pending_mutex.unlock();
         if (self.pending.fetchRemove(request_id)) |entry| {
             var response = entry.value;
+            self.pending_bytes -= response.bytes;
+            self.pending_frames -= response.frames.items.len;
+            self.wakeResponseProducers();
             for (response.frames.items) |frame| self.allocator.free(frame);
             response.frames.deinit(self.allocator);
         }
@@ -365,4 +436,67 @@ test "response end retains tunnel request until explicit discard" {
     try std.testing.expectEqualSlices(u8, &chunk, echoed);
     server.discardRequest(42);
     try std.testing.expect(!server.pushResponse(42, &chunk, chunk.len));
+}
+
+test "response budgets reject before copying and release on dequeue and cancellation" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const server = ProxyServer.create(&config, &port) orelse return error.OutOfMemory;
+    defer server.stop();
+    server.response_limit = 10;
+    server.stream_response_limit = 6;
+    try std.testing.expect(server.registerRequest(1));
+    try std.testing.expect(server.registerRequest(2));
+    try std.testing.expect(!server.registerRequest(1));
+    try std.testing.expectEqual(ProxyServer.PushResult.accepted, server.tryPushResponse(1, "12345678", 8));
+    try std.testing.expectEqual(ProxyServer.PushResult.full, server.tryPushResponse(1, "x", 1));
+    try std.testing.expectEqual(ProxyServer.PushResult.accepted, server.tryPushResponse(2, "ab", 2));
+    try std.testing.expectEqual(ProxyServer.PushResult.full, server.tryPushResponse(2, "c", 1));
+    try std.testing.expectEqual(@as(usize, 10), server.pending_bytes);
+    const first = server.takeResponse(1).?;
+    defer server.allocator.free(first);
+    try std.testing.expectEqualStrings("12345678", first);
+    try std.testing.expectEqual(@as(usize, 2), server.pending_bytes);
+    try std.testing.expectEqual(ProxyServer.PushResult.accepted, server.tryPushResponse(2, "cdef", 4));
+    server.discardRequest(2);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_frames);
+    try std.testing.expectEqual(ProxyServer.PushResult.closed, server.tryPushResponse(2, "x", 1));
+    try std.testing.expectEqual(ProxyServer.PushResult.closed, server.tryPushResponse(1, "12345678901", 11));
+}
+
+test "empty response frames are bounded by slot count" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const server = ProxyServer.create(&config, &port) orelse return error.OutOfMemory;
+    defer server.stop();
+    try std.testing.expect(server.registerRequest(1));
+    for (0..256) |_| try std.testing.expect(server.pushResponse(1, "", 0));
+    try std.testing.expectEqual(ProxyServer.PushResult.full, server.tryPushResponse(1, "", 0));
+    server.discardRequest(1);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_frames);
+}
+
+test "upload credit follows consumption and survives queue reservation rollback" {
+    var config = std.mem.zeroes(c.ServerNativeProxyConfig);
+    config.host = "127.0.0.1";
+    var port: u16 = 0;
+    const server = ProxyServer.create(&config, &port) orelse return error.OutOfMemory;
+    defer server.stop();
+    try std.testing.expect(server.registerRequest(1));
+    try std.testing.expect(server.reserveRequestBytes(1, 65536));
+    try std.testing.expect(!server.reserveRequestBytes(1, 1));
+    try std.testing.expectEqual(@as(usize, 0), server.takeRequestCredit(1));
+    server.consumeRequestBytes(1, 16384);
+    try std.testing.expectEqual(@as(usize, 16384), server.takeRequestCredit(1));
+    try std.testing.expectEqual(@as(usize, 0), server.takeRequestCredit(1));
+    try std.testing.expect(server.reserveRequestBytes(1, 16384));
+    server.refundRequestBytes(1, 16384);
+    try std.testing.expect(server.reserveRequestBytes(1, 16384));
+    try std.testing.expect(!server.reserveRequestBytes(1, 1));
+    server.discardRequest(1);
+    server.consumeRequestBytes(1, 65536);
+    try std.testing.expectEqual(@as(usize, 0), server.takeRequestCredit(1));
 }

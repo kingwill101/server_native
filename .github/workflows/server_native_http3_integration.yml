@@ -81,4 +81,4 @@ jobs:
       - name: Run Zig HTTP/3 interoperability and streaming gates
         env:
           SERVER_NATIVE_BACKEND: zig
-        run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart
+        run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart

@@ -60,6 +60,19 @@ export fn server_native_zig_push_direct_response_frame(
     ));
 }
 
+export fn server_native_zig_try_push_response(
+    handle: ?*anyopaque,
+    request_id: u64,
+    payload: ?[*]const u8,
+    length: u64,
+) u8 {
+    return @intFromEnum(proxy.fromHandle(handle orelse return 0).tryPushResponse(request_id, payload orelse return 0, length));
+}
+
+export fn server_native_zig_consume_request(handle: ?*anyopaque, request_id: u64, count: usize) void {
+    proxy.fromHandle(handle orelse return).consumeRequestBytes(request_id, count);
+}
+
 export fn server_native_zig_complete_direct_request(
     handle: ?*anyopaque,
     request_id: u64,

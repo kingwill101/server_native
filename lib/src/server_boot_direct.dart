@@ -7,7 +7,24 @@ Future<void> _handleChunkedBridgeRequest(
   required _BridgeHandleStream handleStream,
   required BridgeRequestFrame startFrame,
 }) async {
-  final requestBody = StreamController<Uint8List>(sync: true);
+  Completer<void>? demand;
+  var handlerFinished = false;
+  var bodyCancelled = false;
+  void wakeDemand() {
+    final waiting = demand;
+    demand = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete();
+  }
+
+  final requestBody = StreamController<Uint8List>(
+    sync: true,
+    onListen: wakeDemand,
+    onResume: wakeDemand,
+    onCancel: () {
+      bodyCancelled = true;
+      wakeDemand();
+    },
+  );
   var requestBodyBytes = 0;
   var responseStarted = false;
   BridgeDetachedSocket? detachedSocket;
@@ -21,6 +38,7 @@ Future<void> _handleChunkedBridgeRequest(
       responseStarted = true;
       detachedSocket = frame.detachedSocket;
       writer.writeFrame(frame.encodeStartPayload());
+      await writer.flush();
     },
     onResponseChunk: (chunkBytes) async {
       if (chunkBytes.isEmpty) {
@@ -31,10 +49,27 @@ Future<void> _handleChunkedBridgeRequest(
           'bridge response chunk emitted before response start frame',
         );
       }
-      writer.writeChunkFrame(BridgeResponseFrame.chunkFrameType, chunkBytes);
+      await writer.writeChunkFrameAndFlush(
+        BridgeResponseFrame.chunkFrameType,
+        chunkBytes,
+      );
     },
   );
 
+  // Completion also releases an ignored upload so it can be discarded. The
+  // handler's original future remains responsible for propagating errors.
+  unawaited(
+    handlerFuture.then(
+      (_) {
+        handlerFinished = true;
+        wakeDemand();
+      },
+      onError: (Object _, StackTrace _) {
+        handlerFinished = true;
+        wakeDemand();
+      },
+    ),
+  );
   while (true) {
     try {
       final payload = await reader.readFrame();
@@ -70,8 +105,16 @@ Future<void> _handleChunkedBridgeRequest(
           final chunkBytes = Uint8List.sublistView(payload, 6, payloadLength);
           if (detachedSocket != null) {
             detachedSocket!.bridgeSocket.add(chunkBytes);
-          } else {
+          } else if (!bodyCancelled &&
+              !(handlerFinished && !requestBody.hasListener)) {
             requestBody.add(chunkBytes);
+            // StreamIterator pauses the bridge socket while Dart is paused or
+            // has not subscribed. At most one frame waits in this controller.
+            while (!handlerFinished &&
+                !bodyCancelled &&
+                (!requestBody.hasListener || requestBody.isPaused)) {
+              await (demand ??= Completer<void>()).future;
+            }
           }
         }
         continue;

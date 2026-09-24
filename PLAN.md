@@ -68,7 +68,8 @@ Initial scan found:
   - [x] Retain closing/draining connection IDs for three PTOs with bounded close replies and no deadline extension.
   - [x] Progressive request/response streaming in bridge/direct modes with ACK-retained QUIC response chunks.
   - [x] Staged GOAWAY, bounded asynchronous application shutdown, blackholed-path and Dart responsiveness gates.
-  - [ ] Migration-disabled path tests, address-validation/Retry policy, aggregate budgets/end-to-end backpressure, IPv6/shared UDP routing, and sustained resource stress.
+  - [x] Bound native HTTP/3 connection/listener allocations and direct response queues; verify paused upload/download backpressure with independent aioquic clients in bridge/direct modes.
+  - [ ] Migration-disabled path tests, address-validation/Retry policy, IPv6/shared UDP routing, and sustained resource stress (including TLS/Dart allocations outside native budgets).
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
 - [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
 

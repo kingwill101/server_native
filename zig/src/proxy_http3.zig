@@ -4,7 +4,8 @@ const std = @import("std");
 const h3 = @import("http3.zig");
 const shared = @import("proxy_request.zig");
 const c = h3.c;
-const allocator = std.heap.c_allocator;
+const backing_allocator = std.heap.c_allocator;
+const Budget = @import("memory_budget.zig").Budget;
 const max_connections = 128;
 
 fn now() u64 {
@@ -79,6 +80,7 @@ pub fn Runtime(comptime Server: type) type {
         server: *Server,
         thread: ?std.Thread = null,
         peers: std.ArrayList(*Peer) = .empty,
+        memory: Budget = .{ .parent = backing_allocator, .limit = 128 * 1024 * 1024 },
         shutdown_requested: std.atomic.Value(bool) = .init(false),
         shutdown_complete: std.atomic.Value(bool) = .init(false),
         shutdown_started: bool = false,
@@ -95,7 +97,7 @@ pub fn Runtime(comptime Server: type) type {
             var tls = try h3.TlsContext.initServer();
             errdefer tls.deinit();
             try tls.certificate(cert, key);
-            const self = try allocator.create(Self);
+            const self = try backing_allocator.create(Self);
             self.* = .{ .fd = fd, .local = local, .local_len = len, .tls = tls, .server = server };
             return self;
         }
@@ -111,10 +113,11 @@ pub fn Runtime(comptime Server: type) type {
         pub fn deinit(self: *Self) void {
             if (self.thread) |thread| thread.join();
             for (self.peers.items) |peer| peer.deinit();
-            self.peers.deinit(allocator);
+            self.peers.deinit(self.memory.allocator());
             self.tls.deinit();
             _ = c.close(self.fd);
-            allocator.destroy(self);
+            std.debug.assert(self.memory.used == 0);
+            backing_allocator.destroy(self);
         }
         fn run(self: *Self) void {
             defer self.shutdown_complete.store(true, .release);
@@ -180,7 +183,7 @@ pub fn Runtime(comptime Server: type) type {
                 if (header.version != c.NGTCP2_PROTO_VER_V1) return;
                 const peer = try Peer.create(self, &header, remote, remote_len);
                 errdefer peer.deinit();
-                try self.peers.append(allocator, peer);
+                try self.peers.append(self.memory.allocator(), peer);
                 found = peer;
             }
             const peer = found.?;
@@ -216,6 +219,9 @@ pub fn Runtime(comptime Server: type) type {
         };
         const Peer = struct {
             owner: *Self,
+            memory: Budget,
+            quic_memory: c.ngtcp2_mem = undefined,
+            http_memory: c.nghttp3_mem = undefined,
             quic: ?*c.ngtcp2_conn = null,
             codec: ?h3.Connection = null,
             tls: ?h3.TlsSession = null,
@@ -237,8 +243,18 @@ pub fn Runtime(comptime Server: type) type {
             close_remote_len: c.socklen_t = 0,
 
             fn create(owner: *Self, header: *c.ngtcp2_pkt_hd, remote: *c.sockaddr_storage, remote_len: c.socklen_t) !*Peer {
-                const self = try allocator.create(Peer);
-                self.* = .{ .owner = owner, .original = header.dcid, .remote = remote.*, .remote_len = remote_len, .streams = std.AutoHashMap(i64, Stream).init(allocator) };
+                const self = try owner.memory.allocator().create(Peer);
+                self.* = .{
+                    .owner = owner,
+                    .memory = .{ .parent = owner.memory.allocator(), .limit = 16 * 1024 * 1024 },
+                    .original = header.dcid,
+                    .remote = remote.*,
+                    .remote_len = remote_len,
+                    .streams = undefined,
+                };
+                self.streams = .init(self.memory.allocator());
+                self.quic_memory = .{ .user_data = &self.memory, .malloc = Budget.cMalloc, .calloc = Budget.cCalloc, .realloc = Budget.cRealloc, .free = Budget.cFree };
+                self.http_memory = .{ .user_data = &self.memory, .malloc = Budget.cMalloc, .calloc = Budget.cCalloc, .realloc = Budget.cRealloc, .free = Budget.cFree };
                 errdefer self.deinit();
                 self.ref = .{ .get_conn = getConn, .user_data = self };
                 var callbacks = std.mem.zeroes(c.ngtcp2_callbacks);
@@ -271,7 +287,7 @@ pub fn Runtime(comptime Server: type) type {
                 cid.datalen = 16;
                 _ = c.RAND_bytes(&cid.data, cid.datalen);
                 var path = self.networkPath();
-                if (c.ngtcp2_conn_server_new(&self.quic, &header.scid, &cid, &path, header.version, &callbacks, &config.settings, &config.transport, null, self) != 0) return error.QuicFailed;
+                if (c.ngtcp2_conn_server_new(&self.quic, &header.scid, &cid, &path, header.version, &callbacks, &config.settings, &config.transport, &self.quic_memory, self) != 0) return error.QuicFailed;
                 var params: [512]u8 = undefined;
                 const encoded = try config.encode(&params);
                 self.tls = try owner.tls.session(encoded);
@@ -296,6 +312,7 @@ pub fn Runtime(comptime Server: type) type {
                 return false;
             }
             fn deinit(self: *Peer) void {
+                const allocator = self.memory.allocator();
                 if (self.codec) |*codec| codec.deinit();
                 if (self.quic) |quic| c.ngtcp2_conn_del(quic);
                 if (self.tls) |*tls| tls.deinit();
@@ -306,7 +323,8 @@ pub fn Runtime(comptime Server: type) type {
                     stream.request.deinit();
                 }
                 self.streams.deinit();
-                allocator.destroy(self);
+                std.debug.assert(self.memory.used == 0);
+                self.owner.memory.allocator().destroy(self);
             }
             fn finishCancelledBodies(self: *Peer) bool {
                 var ready = true;
@@ -363,6 +381,7 @@ pub fn Runtime(comptime Server: type) type {
                 if (size < 0 and std.posix.errno(size) != .AGAIN) return error.SendFailed;
             }
             fn tick(self: *Peer) !void {
+                const allocator = self.memory.allocator();
                 if (self.failed) return;
                 const time = now();
                 if (c.ngtcp2_conn_get_expiry(self.quic) <= time) {
@@ -385,6 +404,8 @@ pub fn Runtime(comptime Server: type) type {
                         const stream = entry.value_ptr;
                         if (stream.closed) {
                             if (!try shared.finishCancelledRequest(self.owner.server, stream.request)) continue;
+                            c.ngtcp2_conn_extend_max_offset(self.quic, stream.request.uncredited_body);
+                            stream.request.uncredited_body = 0;
                             try retired.append(allocator, entry.key_ptr.*);
                             continue;
                         }
@@ -394,6 +415,7 @@ pub fn Runtime(comptime Server: type) type {
                         try shared.progressRequest(allocator, self.owner.server, request);
                         if (request.consumed_body != 0) {
                             self.credit(entry.key_ptr.*, request.consumed_body);
+                            request.uncredited_body -= request.consumed_body;
                             request.consumed_body = 0;
                         }
                         if (request.response.body.items.len != 0) {
@@ -501,7 +523,7 @@ pub fn Runtime(comptime Server: type) type {
                 callbacks.stream_close = httpClosed;
                 callbacks.stop_sending = stopSending;
                 callbacks.reset_stream = resetStream;
-                self.codec = try h3.Connection.initServer(&callbacks, self);
+                self.codec = try h3.Connection.initServerWithMemory(&callbacks, self, &self.http_memory);
                 c.nghttp3_conn_set_max_client_streams_bidi(self.codec.?.native, 100);
                 var ids: [3]i64 = undefined;
                 for (&ids) |*id| if (c.ngtcp2_conn_open_uni_stream(self.quic, id, null) != 0) return error.StreamLimit;
@@ -553,6 +575,7 @@ pub fn Runtime(comptime Server: type) type {
             }
             fn beginHeaders(_: ?*c.nghttp3_conn, stream: i64, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
                 const self = selfFrom(Peer, context);
+                const allocator = self.memory.allocator();
                 if (self.streams.contains(stream)) return 0;
                 if (self.streams.count() >= 100) return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 const request = allocator.create(shared.Request) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -571,7 +594,8 @@ pub fn Runtime(comptime Server: type) type {
                 self.addHeader(state.request, n.base[0..n.len], v.base[0..v.len]) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 return 0;
             }
-            fn addHeader(_: *Peer, request: *shared.Request, name: []const u8, value: []const u8) !void {
+            fn addHeader(self: *Peer, request: *shared.Request, name: []const u8, value: []const u8) !void {
+                const allocator = self.memory.allocator();
                 const owned = try allocator.dupe(u8, value);
                 errdefer allocator.free(owned);
                 const target: ?*[]u8 = if (std.mem.eql(u8, name, ":method")) &request.method else if (std.mem.eql(u8, name, ":scheme")) &request.scheme else if (std.mem.eql(u8, name, ":authority")) &request.authority else if (std.mem.eql(u8, name, ":path")) &request.path else null;
@@ -591,15 +615,18 @@ pub fn Runtime(comptime Server: type) type {
             }
             fn acknowledgedBody(_: ?*c.nghttp3_conn, stream: i64, count: u64, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
                 const self = selfFrom(Peer, context);
+                const allocator = self.memory.allocator();
                 const state = self.streams.getPtr(stream) orelse return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 state.body.acknowledge(allocator, @intCast(count)) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 return 0;
             }
             fn data(_: ?*c.nghttp3_conn, stream: i64, bytes: [*c]const u8, len: usize, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
                 const self = selfFrom(Peer, context);
+                const allocator = self.memory.allocator();
                 const state = self.streams.getPtr(stream) orelse return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 if (len > 32 * 1024 * 1024 -| state.request.body.items.len) return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 state.request.body.appendSlice(allocator, bytes[0..len]) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
+                state.request.uncredited_body += len;
                 return 0;
             }
             fn consumed(_: ?*c.nghttp3_conn, stream: i64, len: usize, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {

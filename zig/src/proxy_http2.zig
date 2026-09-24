@@ -57,6 +57,7 @@ const State = struct {
                 const request = self.requests.get(data.stream) orelse return false;
                 if (data.bytes.len > 32 * 1024 * 1024 -| request.body.items.len) return false;
                 request.body.appendSlice(self.allocator, data.bytes) catch return false;
+                request.uncredited_body += data.bytes.len;
             },
             .headers_end => |stream| {
                 if (self.requests.get(stream)) |request| request.headers_ready = true;
@@ -136,6 +137,7 @@ fn dispatchReady(allocator: std.mem.Allocator, server: anytype, session: *http2.
         };
         if (request.consumed_body != 0) {
             try session.consume(stream, request.consumed_body);
+            request.uncredited_body -= request.consumed_body;
             request.consumed_body = 0;
         }
         if (request.response_submitted) {
@@ -161,6 +163,7 @@ fn dispatchReady(allocator: std.mem.Allocator, server: anytype, session: *http2.
     }
     for (retired.items) |stream| {
         const request = state.requests.fetchRemove(stream).?.value;
+        try session.consumeConnection(request.uncredited_body);
         if (request.request_id) |id| server.discardRequest(id);
         request.deinit();
     }

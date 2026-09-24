@@ -125,6 +125,7 @@ Future<void> _handleBridgeSocket(
 }) async {
   final reader = _SocketFrameReader(socket);
   final writer = _BridgeSocketWriter(socket);
+  var transportFailed = false;
   try {
     while (true) {
       Uint8List? firstPayload;
@@ -157,6 +158,9 @@ Future<void> _handleBridgeSocket(
           }
           continue;
         }
+      } on SocketException {
+        transportFailed = true;
+        return;
       } catch (error) {
         _writeBridgeBadRequest(writer, error);
         continue;
@@ -193,15 +197,20 @@ Future<void> _handleBridgeSocket(
       }
     }
   } catch (error, stack) {
+    transportFailed = true;
     stderr.writeln('[server_native] bridge socket error: $error\n$stack');
   } finally {
     onSocketClosed?.call();
     await reader.cancel();
-    try {
-      await socket.flush();
-    } catch (_) {}
-    try {
-      await socket.close();
-    } catch (_) {}
+    if (transportFailed) {
+      socket.destroy();
+    } else {
+      try {
+        await socket.flush();
+      } catch (_) {}
+      try {
+        await socket.close();
+      } catch (_) {}
+    }
   }
 }

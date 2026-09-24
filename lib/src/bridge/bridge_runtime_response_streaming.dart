@@ -109,6 +109,7 @@ final class BridgeStreamingHttpResponse implements HttpResponse {
     await _pendingWrite;
     await for (final chunk in stream) {
       add(chunk);
+      await _pendingWrite;
     }
     await _pendingWrite;
   }

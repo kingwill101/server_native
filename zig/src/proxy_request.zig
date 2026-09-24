@@ -19,6 +19,7 @@ pub const Request = struct {
     request_id: ?u64 = null,
     direct_stage: enum { start, body, end, waiting } = .start,
     consumed_body: usize = 0,
+    uncredited_body: usize = 0,
     outgoing_body: usize = 0,
     response_submitted: bool = false,
     backend: ?http1.Connection = null,
@@ -63,6 +64,7 @@ fn requestHead(request: *Request) bridge_protocol.RequestHead {
 // Each pass does bounded work per stream; a pending Dart handler never owns
 // the connection's receive loop. Only that loop calls the nghttp2 session.
 pub fn progressRequest(allocator: std.mem.Allocator, server: anytype, request: *Request) !void {
+    if (request.request_id) |id| request.consumed_body += server.takeRequestCredit(id);
     if (!request.headers_ready) return;
     if (request.response_done and request.direct_stage == .waiting) return;
     if (!request.started) {
@@ -110,17 +112,21 @@ pub fn progressRequest(allocator: std.mem.Allocator, server: anytype, request: *
                 sent = request.outgoing_offset == request.outgoing.len;
             }
         } else {
-            sent = true;
-            server.queue.push(@bitCast(request.request_id.?), request.outgoing) catch |err| {
-                if (err != error.QueueFull) return err;
-                sent = false;
-            };
+            const id = request.request_id.?;
+            if (server.reserveRequestBytes(id, request.outgoing_body)) {
+                sent = true;
+                server.queue.push(@bitCast(id), request.outgoing) catch |err| {
+                    server.refundRequestBytes(id, request.outgoing_body);
+                    if (err != error.QueueFull) return err;
+                    sent = false;
+                };
+            }
         }
         if (sent) {
             allocator.free(request.outgoing);
             request.outgoing = &.{};
             request.outgoing_offset = 0;
-            request.consumed_body += request.outgoing_body;
+            if (request.backend != null) request.consumed_body += request.outgoing_body;
             request.outgoing_body = 0;
             request.direct_stage = if (request.direct_stage == .end) .waiting else .body;
         }
@@ -147,7 +153,7 @@ pub fn progressRequest(allocator: std.mem.Allocator, server: anytype, request: *
             for (0..16) |_| {
                 if (request.response_done or request.response.body.items.len >= 256 * 1024) break;
                 const frame = server.takeResponse(request.request_id.?) orelse break;
-                defer allocator.free(frame);
+                defer server.allocator.free(frame);
                 try bridge_io.decodeResponseFrame(allocator, frame, &request.response, &request.response_done);
             }
         }
@@ -264,9 +270,12 @@ test "progressive direct request waits for queue capacity and never invents EOF"
     const Queue = @import("event_queue.zig").Queue;
     const Fake = struct {
         queue: *Queue,
+        allocator: std.mem.Allocator = std.testing.allocator,
         next_request_id: std.atomic.Value(u64) = .init(1),
         http3: ?u8 = null,
         port: u16 = 0,
+        outstanding: usize = 0,
+        credit: usize = 0,
         pub fn bridgeEnabled(_: *@This()) bool {
             return false;
         }
@@ -275,6 +284,18 @@ test "progressive direct request waits for queue capacity and never invents EOF"
         }
         pub fn registerRequest(_: *@This(), _: u64) bool {
             return true;
+        }
+        pub fn reserveRequestBytes(self: *@This(), _: u64, n: usize) bool {
+            self.outstanding += n;
+            return true;
+        }
+        pub fn refundRequestBytes(self: *@This(), _: u64, n: usize) void {
+            self.outstanding -= n;
+        }
+        pub fn takeRequestCredit(self: *@This(), _: u64) usize {
+            const n = self.credit;
+            self.credit = 0;
+            return n;
         }
         pub fn takeResponse(_: *@This(), _: u64) ?[]u8 {
             return null;
@@ -293,6 +314,10 @@ test "progressive direct request waits for queue capacity and never invents EOF"
     try std.testing.expectEqual(@as(usize, 0), request.consumed_body);
     const start = queue.pop().?;
     queue.release(start);
+    try progressRequest(a, &server, request);
+    try std.testing.expectEqual(@as(usize, 0), request.consumed_body);
+    try std.testing.expectEqual(@as(usize, 3), server.outstanding);
+    server.credit = 3;
     try progressRequest(a, &server, request);
     try std.testing.expectEqual(@as(usize, 3), request.consumed_body);
     const chunk = queue.pop().?;

@@ -25,11 +25,14 @@ pub const Connection = struct {
     /// Callback user data must remain valid until deinit. This value owns its
     /// connection and must not be copied. Callbacks use nghttp3's borrowed data.
     pub fn initServer(callbacks: *const c.nghttp3_callbacks, user_data: ?*anyopaque) Error!Connection {
+        return initServerWithMemory(callbacks, user_data, null);
+    }
+    pub fn initServerWithMemory(callbacks: *const c.nghttp3_callbacks, user_data: ?*anyopaque, memory: ?*const c.nghttp3_mem) Error!Connection {
         var settings: c.nghttp3_settings = undefined;
         c.nghttp3_settings_default(&settings);
         settings.max_field_section_size = 64 * 1024;
         var self: Connection = .{ .native = null };
-        try self.check(c.nghttp3_conn_server_new(&self.native, callbacks, &settings, null, user_data));
+        try self.check(c.nghttp3_conn_server_new(&self.native, callbacks, &settings, memory, user_data));
         return self;
     }
     pub fn deinit(self: *Connection) void {
@@ -510,4 +513,18 @@ test "HTTP3 fragmented multi-byte unknown stream type may finish normally" {
     _ = try conn.receive(2, &.{0x21}, false, 1);
     _ = try conn.receive(2, "discard me", true, 2);
     try conn.bindStreams(3, 7, 11);
+}
+
+test "HTTP3 native allocations honor budget and failed initialization releases capacity" {
+    const Budget = @import("memory_budget.zig").Budget;
+    var budget: Budget = .{ .parent = std.testing.allocator, .limit = 64 };
+    var memory: c.nghttp3_mem = .{ .user_data = &budget, .malloc = Budget.cMalloc, .calloc = Budget.cCalloc, .realloc = Budget.cRealloc, .free = Budget.cFree };
+    var callbacks = std.mem.zeroes(c.nghttp3_callbacks);
+    try std.testing.expectError(error.OutOfMemory, Connection.initServerWithMemory(&callbacks, null, &memory));
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+    budget.limit = 1024 * 1024;
+    var connection = try Connection.initServerWithMemory(&callbacks, null, &memory);
+    try std.testing.expect(budget.used > 0);
+    connection.deinit();
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
 }

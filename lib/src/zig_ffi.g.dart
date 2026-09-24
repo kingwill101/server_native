@@ -63,6 +63,30 @@ external int server_native_zig_push_direct_response_frame(
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
   )
+>(symbol: 'server_native_zig_try_push_response')
+external int server_native_zig_try_push_response(
+  ffi.Pointer<ffi.Void> handle,
+  int request_id,
+  ffi.Pointer<ffi.Uint8> payload,
+  int length,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>, ffi.Uint64, ffi.UintPtr)>(
+  symbol: 'server_native_zig_consume_request',
+)
+external void server_native_zig_consume_request(
+  ffi.Pointer<ffi.Void> handle,
+  int request_id,
+  int count,
+);
+
+@ffi.Native<
+  ffi.Uint8 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+  )
 >(symbol: 'server_native_zig_complete_direct_request')
 external int server_native_zig_complete_direct_request(
   ffi.Pointer<ffi.Void> handle,

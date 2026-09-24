@@ -384,6 +384,43 @@ final class NativeProxyServer {
     }
   }
 
+  /// Waits for native response capacity without dropping a frame or blocking Dart.
+  Future<bool> pushDirectResponseFrameAsync(
+    int requestId,
+    Uint8List payload,
+  ) async {
+    if (!_zigBackend) return pushDirectResponseFrame(requestId, payload);
+    if (_closed) return false;
+    final pointer = calloc<ffi.Uint8>(payload.length);
+    try {
+      pointer.asTypedList(payload.length).setAll(0, payload);
+      while (!_closed) {
+        // Capture the wake future before checking capacity to avoid losing a
+        // concurrent dequeue notification between the check and the await.
+        final ready = _requestReady;
+        final result = zig_ffi.server_native_zig_try_push_response(
+          _handle,
+          requestId,
+          pointer,
+          payload.length,
+        );
+        if (result != 2) return result == 1;
+        await ready.future;
+        if (identical(_requestReady, ready)) _requestReady = Completer<void>();
+      }
+      return false;
+    } finally {
+      calloc.free(pointer);
+    }
+  }
+
+  /// Returns upload credit after a body chunk reaches a Dart stream listener.
+  void consumeDirectRequestBytes(int requestId, int count) {
+    if (_zigBackend && !_closed) {
+      zig_ffi.server_native_zig_consume_request(_handle, requestId, count);
+    }
+  }
+
   bool completeDirectRequest(int requestId, Uint8List responsePayload) {
     // Backward-compatible alias for one-shot response mode.
     return pushDirectResponseFrame(requestId, responsePayload);

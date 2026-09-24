@@ -189,6 +189,11 @@ pub const Session = struct {
         try self.check(c.nghttp2_session_consume(self.native, stream, count));
     }
 
+    pub fn consumeConnection(self: *Session, count: usize) Error!void {
+        try self.alive();
+        try self.check(c.nghttp2_session_consume_connection(self.native, count));
+    }
+
     /// Copies a finite response body. Memory is bounded across all active streams.
     pub fn respond(self: *Session, stream: i32, status: u16, headers: []const Header, bytes: []const u8) Error!void {
         try self.alive();
