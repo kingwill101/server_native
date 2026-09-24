@@ -52,6 +52,14 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
+      - name: Build Zig library
+        run: zig build
+        working-directory: zig
+
+      - name: Run Zig unit tests
+        run: zig build test
+        working-directory: zig
+
       - name: Regenerate and verify Zig bindings
         run: |
           dart run native_toolchain_zig:zig bindings \
@@ -63,14 +71,6 @@ jobs:
             --link-libc
           dart format lib/src/zig_ffi.g.dart
           git diff --exit-code -- lib/src/zig_ffi.g.dart
-
-      - name: Build Zig library
-        run: zig build
-        working-directory: zig
-
-      - name: Run Zig unit tests
-        run: zig build test
-        working-directory: zig
 
       - name: Check changed Dart formatting
         run: dart format --output=none --set-exit-if-changed hook/build.dart lib/src/zig_ffi.g.dart test/zig_dart_api_test.dart
