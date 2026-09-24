@@ -15,13 +15,21 @@ bootstrap.
 
 ## Zig Migration Status
 
-Rust remains the default transport. Select the experimental Zig backend with
-`SERVER_NATIVE_BACKEND=zig`. Zig serves HTTP/1.1 (including TLS), HTTP/2,
-and an initial HTTP/3 UDP/QUIC runtime through the existing Dart API.
-HTTP/3 has curl and independent aioquic interoperability tests, but its production
-milestone remains open. Rust remains the release/default backend until all HTTP/3
-streaming, shutdown, memory, and cross-target gates pass. See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
-Zig Linux x64 packaging is configured separately in `zig_prebuilt.yaml`. The hook falls back to source until a verified release manifest is imported; Rust prebuilts remain separate.
+Rust remains the default transport. Select Zig with `SERVER_NATIVE_BACKEND=zig`
+or `--define=server_native.backend=zig` on Linux x64/ARM64. Linux x64 runtime
+gates pass; ARM64 cross-builds pass, with native ARM64 execution still pending.
+The compile-time `server_native.zig_default` switch defaults to false; setting it
+to true opts that application into Zig unless an explicit backend overrides it.
+Other targets use Rust until their Zig ports are validated.
+
+Zig serves HTTP/1.1 with TLS, HTTP/2, and HTTP/3 through the existing Dart API.
+The Linux HTTP/3 streaming, shutdown, interoperability and resource gates pass.
+Cross-target validation and release promotion remain open. See
+[runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
+
+Linux x64 and ARM64 packaging is configured in `zig_prebuilt.yaml`. The checked-in
+Zig prebuilt manifest remains empty until the matching release assets are
+published and verified. Source builds remain available; Rust prebuilts are separate.
 
 ## Table Of Contents
 

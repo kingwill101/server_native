@@ -78,3 +78,7 @@ jobs:
         run: |
           dart run tool/generate_prebuilt_release.dart
           git diff --exit-code -- lib/src/generated/prebuilt_release.g.dart
+
+      - name: Validate published package contents
+        working-directory: .
+        run: dart pub publish --dry-run

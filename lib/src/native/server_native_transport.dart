@@ -47,9 +47,16 @@ final class NativeDirectRequestFrame {
   final Uint8List payload;
 }
 
+// Rust remains the default. An application can opt into a Zig default at
+// compile time; an explicit backend define or runtime environment value still
+// takes precedence. Release promotion remains a separate validation decision.
+const _zigDefaultPromotion = bool.fromEnvironment(
+  'server_native.zig_default',
+  defaultValue: false,
+);
 const _compileTimeBackend = String.fromEnvironment(
   'server_native.backend',
-  defaultValue: 'rust',
+  defaultValue: _zigDefaultPromotion ? 'zig' : 'rust',
 );
 
 bool _zigApiInitialized = false;
@@ -60,7 +67,18 @@ String _configuredBackend() {
       ? _compileTimeBackend
       : runtime;
   final normalized = value.trim().toLowerCase();
-  if (normalized == 'rust' || normalized == 'zig') {
+  if (normalized == 'rust') return normalized;
+  if (normalized == 'zig') {
+    final supported =
+        Platform.isLinux &&
+        (ffi.Abi.current() == ffi.Abi.linuxX64 ||
+            ffi.Abi.current() == ffi.Abi.linuxArm64);
+    if (!supported) {
+      throw UnsupportedError(
+        'The Zig backend is currently available only on Linux x64 and ARM64; '
+        'use the Rust backend for this target.',
+      );
+    }
     return normalized;
   }
   throw StateError(

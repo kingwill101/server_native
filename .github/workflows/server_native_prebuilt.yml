@@ -241,8 +241,8 @@ jobs:
       - name: Build and test Zig asset on its native architecture
         working-directory: zig
         run: |
-          zig build -Doptimize=ReleaseSafe
-          zig build test -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe -Dstrip=true
+          zig build test -Doptimize=ReleaseSafe -Dstrip=true
 
       - name: Install independent QUIC client
         run: |
@@ -307,6 +307,11 @@ jobs:
             --built-library-dir .dart_tool/zig-built \
             --release-assets-dir .dart_tool/zig-release-assets \
             --output .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart
+          dart run native_prebuilt manifest verify-release \
+            --config zig_prebuilt.yaml \
+            --manifest .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart \
+            --release-assets-dir .dart_tool/zig-release-assets \
+            --built-library-dir .dart_tool/zig-built --strict
           cd .dart_tool/zig-release-assets
           sha256sum *.tar.gz > SHA256SUMS-zig.txt
         env:

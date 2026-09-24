@@ -77,10 +77,10 @@ Initial scan found:
   - [x] Resolve parallel UDP rebind failures: verify native socket inode release, allow the measured fork-to-exec inherited-descriptor window, and restore parallel protocol tests.
   - [x] Isolate bridge Unix socket namespaces atomically so concurrent listener startup/cleanup cannot unlink a peer.
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
-  - [x] Linux x64 and ARM64 artifact packaging with a combined strict checksum manifest; local ARM64 ReleaseSafe cross-build verified.
-  - [ ] Native ARM64 CI execution and published-archive consumer validation.
-  - [ ] macOS, Windows, Android, and iOS Zig build/runtime artifacts.
-- [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
+  - [x] Linux x64 and ARM64 artifact packaging with stripped ReleaseSafe binaries, a combined strict checksum manifest, and local ARM64 cross-build verification.
+  - [ ] Native ARM64 CI execution and published-archive consumer validation; local checksum verification passes.
+  - [ ] macOS, Windows, Android, and iOS Zig ports and artifacts; these targets retain Rust for now.
+- [ ] Promote Zig after the complete target matrix is validated. Explicit selection is currently limited to Linux x64/ARM64; Rust remains the default. The compile-time `server_native.zig_default` switch defaults to false.
 
 ## Verification
 

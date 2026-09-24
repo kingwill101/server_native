@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Strip debug information from release assets") orelse false;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
@@ -10,6 +11,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
         .pic = true,
+        .strip = strip,
     });
 
     const protocol_libraries = @import("protocol_dependencies.zig").attach(b, root_module, target, optimize);
@@ -60,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
         .link_libcpp = true,
+        .strip = strip,
     });
     static_test_module.addObjectFile(bundled_archive);
     const static_tests = b.addTest(.{ .root_module = static_test_module });

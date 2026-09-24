@@ -2,6 +2,9 @@ name: server_native
 description: Rust-backed transport boot APIs for Dart HTTP servers.
 version: 0.1.3+1
 publish_to: none
+false_secrets:
+  - zig/src/testdata/*.pem
+  - example/http2/key.pem
 homepage: https://github.com/kingwill101/routed/tree/master/packages/server_native
 repository: https://github.com/kingwill101/routed
 issue_tracker: https://github.com/kingwill101/routed/issues
@@ -28,10 +31,7 @@ dependencies:
   native_prebuilt: ^0.5.0
   json_annotation: ^4.10.0
   native_toolchain_rust: ^1.0.3
-  native_toolchain_zig:
-    git:
-      url: https://github.com/kingwill101/native_toolchain_zig.dart.git
-      ref: cimport-generator-wip
+  native_toolchain_zig: ^0.2.0
 
 dev_dependencies:
   http2: ^2.3.1

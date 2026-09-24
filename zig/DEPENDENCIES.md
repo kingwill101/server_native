@@ -51,11 +51,13 @@ static archive so static consumers do not need separate protocol/TLS archives.
 Static consumers still need the target C/C++ runtime libraries.
 
 BoringSSL is the integrated build provider. AWS-LC is not linked into the
-normal build. Linux x86_64 builds and runtime tests pass; Linux ARM64 also
-cross-builds in ReleaseSafe, with native runtime tests configured in release CI
-but not yet executed there. Other targets remain unvalidated; in particular
-the upstream BoringSSL wrapper's Windows limitations still apply. Keep each library's license with
-redistributed source or binary artifacts.
+normal build. Linux x86_64 builds and runtime tests pass; Linux ARM64 also cross-builds in
+ReleaseSafe and has a native-architecture runtime matrix in release CI. Native ARM64 execution remains pending. The
+configured Zig artifact set is limited to Linux x86_64 and ARM64:
+the current POSIX listener and BoringSSL wrapper do not provide supported Zig
+artifacts for macOS, Windows, Android, or iOS. Those platforms continue to use
+the unchanged Rust artifact set until a separate Zig port is validated. Keep
+each library's license with redistributed source or binary artifacts.
 
 ## Internal Zig adapters
 
@@ -332,17 +334,17 @@ unlinking of another isolate's Unix socket.
 
 `zig_prebuilt.yaml` describes separate Linux x64 and ARM64 artifacts. The build
 hook uses its generated manifest with checksum verification and Zig source
-fallback. The checked-in manifest intentionally has no artifacts until an actual
-release has been verified; it does not invent hashes or reuse Rust hashes.
-The release workflow builds and tests each library on its native architecture,
+fallback. The checked-in manifest stays empty until matching release assets are
+published and independently verified. Local stripped ReleaseSafe builds have
+passed archive/payload checksum verification for Linux x64 and ARM64; those
+local hashes are not enabled as downloadable assets.
+The release workflow builds and tests each Linux library on its native architecture,
 then packages both platform directories with `native_prebuilt --strict` into a
-combined manifest with archive/payload checksums. The manifest and checksums
-are uploaded alongside the archives. Linux ARM64 cross-compilation and local
-two-architecture packaging have been verified; native ARM64 workflow execution
-remains a release gate. Import the verified release manifest into
-`lib/src/generated/server_native_zig_prebuilts.g.dart` before enabling release
-artifact selection. macOS, Windows, Android, iOS, and published-archive consumer
-tests remain release gates. Local source checkouts always compile current sources.
+combined manifest. It also runs `manifest verify-release` against the local
+archives before uploading artifacts. Native ARM64 workflow execution and
+published-archive consumer validation remain open gates. macOS, Windows,
+Android and iOS retain Rust until their Zig ports are validated. Local source
+checkouts always compile current sources.
 
 Regenerate internal ABI bindings with `python3 tool/generate_zig_bindings.py`.
 It derives signatures from `src/lib.zig` and invokes the toolchain generator;
