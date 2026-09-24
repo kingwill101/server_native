@@ -134,6 +134,7 @@ pub fn serveConnection(
         }
     }
     if (!response_done) return error.ResponseUnavailable;
+    try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
 }
@@ -176,6 +177,7 @@ fn serveBridge(
         try runTunnel(allocator, server, backend.fd, connection);
         return false;
     }
+    try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
 }

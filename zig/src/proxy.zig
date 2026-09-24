@@ -4,6 +4,7 @@ const event_queue = @import("event_queue.zig");
 const bridge_protocol = @import("bridge_protocol.zig");
 const proxy_http1 = @import("proxy_http1.zig");
 const proxy_http2 = @import("proxy_http2.zig");
+const proxy_http3 = @import("proxy_http3.zig");
 const http1 = @import("http1.zig").posix;
 
 const c = abi.c;
@@ -46,6 +47,7 @@ pub const ProxyServer = struct {
     backend_port: u16 = 0,
     tls: ?http1.TlsContext = null,
     http2_enabled: bool = false,
+    http3: ?*proxy_http3.Runtime(ProxyServer) = null,
     event_port: std.atomic.Value(i64) = .init(0),
 
     pub fn setEventPort(self: *ProxyServer, port: i64) void {
@@ -140,7 +142,21 @@ pub const ProxyServer = struct {
             .tls = tls,
             .http2_enabled = config.http2 != 0,
         };
+        if (config.http3 != 0 and tls != null) {
+            server.http3 = proxy_http3.Runtime(ProxyServer).create(server, std.mem.span(config.tls_cert_path), std.mem.span(config.tls_key_path)) catch {
+                server.stop();
+                return null;
+            };
+            server.http3.?.start() catch {
+                server.stop();
+                return null;
+            };
+        }
         server.accept_thread = std.Thread.spawn(.{}, acceptLoop, .{server}) catch {
+            if (server.http3 != null) {
+                server.stop();
+                return null;
+            }
             server.queue.deinit();
             allocator.destroy(server.queue);
             server.listener.close();
@@ -164,6 +180,7 @@ pub const ProxyServer = struct {
         while (self.active_connections.load(.acquire) != 0) {
             std.atomic.spinLoopHint();
         }
+        if (self.http3) |runtime| runtime.deinit();
         self.queue.deinit();
         self.allocator.destroy(self.queue);
         self.pending_mutex.lock();

@@ -15,10 +15,11 @@ bootstrap.
 
 ## Zig Migration Status
 
-The Rust HTTP transport remains active and continues to provide the existing
-HTTP/1.1, HTTP/2, and HTTP/3 behavior. The Zig code currently builds a native
-asset and demonstrates Dart API-DL initialization and message delivery; it is
-not yet serving HTTP traffic.
+Rust remains the default transport. Select the experimental Zig backend with
+`SERVER_NATIVE_BACKEND=zig`. Zig serves HTTP/1.1 (including TLS), HTTP/2,
+and an initial HTTP/3 UDP/QUIC runtime through the existing Dart API.
+HTTP/3 has curl and independent aioquic interoperability tests, but its production
+milestone remains open. See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
 
 ## Table Of Contents
 

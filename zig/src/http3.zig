@@ -6,6 +6,12 @@ pub const c = @cImport({
     @cInclude("ngtcp2/ngtcp2.h");
     @cInclude("ngtcp2/ngtcp2_crypto_boringssl.h");
     @cInclude("openssl/ssl.h");
+    @cInclude("openssl/rand.h");
+    @cInclude("ngtcp2/ngtcp2_crypto.h");
+    @cInclude("sys/socket.h");
+    @cInclude("netdb.h");
+    @cInclude("unistd.h");
+    @cInclude("time.h");
 });
 pub const Error = error{ NativeFailure, OutOfMemory, Closed, InvalidArgument, BufferTooSmall };
 

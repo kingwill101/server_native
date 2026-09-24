@@ -17,8 +17,8 @@ zig build test
 ```
 
 The build makes the libraries and C headers available to the Zig runtime.
-HTTP/2 runtime integration and TLS HTTP/1 support are implemented; HTTP/3
-listeners remain unimplemented. Unused archive members can be omitted by
+HTTP/2 runtime integration and TLS HTTP/1 support are implemented. An initial
+HTTP/3 UDP listener is integrated; its production milestone remains open. Unused archive members can be omitted by
 the linker until the runtime references them. To prefetch every
 pinned dependency, including AWS-LC, use `zig build --fetch=all`.
 
@@ -60,8 +60,9 @@ redistributed source or binary artifacts.
 
 `src/lib.zig` exposes `http2` and `http3` to Zig code only. No new C exports,
 Dart bindings, or Dart configuration options are added, and the existing
-listener dispatches HTTP/2 connections to the internal session adapter. HTTP/3
-remains an internal adapter without a network listener.
+listener dispatches HTTP/2 connections to the internal session adapter.
+For TLS listeners with the existing `http3` option enabled, `proxy_http3.zig`
+binds UDP on the same port and drives the internal HTTP/3 adapter.
 
 `http2.Session` owns an nghttp2 server session at a stable allocation address.
 It accepts fragmented input, emits borrowed header/DATA/lifecycle events,
@@ -85,10 +86,9 @@ disabled and serializes transport parameters through ngtcp2. Server CID-specific
 parameters must be populated per connection. `http3.TlsContext` owns a BoringSSL
 QUIC context, selects h3 ALPN, loads PEM credentials, and creates owned TLS
 sessions. The connection owner must attach `ngtcp2_crypto_conn_ref` before
-driving a handshake. UDP sockets, the ngtcp2 connection driver, timers,
-retransmission, certificate-backed handshakes, and request/frame mapping are
-still future integration work. These owning values must not be copied or
-shared concurrently between threads.
+driving a handshake. `proxy_http3.zig` supplies UDP sockets, the connection
+driver, timer processing, TLS handshakes and request/frame mapping. These
+owning values must not be copied or shared concurrently between threads.
 
 ## Tests
 
@@ -113,9 +113,9 @@ Run `zig build test`. The suite covers the cases below on Linux x86_64.
 - Linking the runtime and protocol/TLS APIs using only the bundled static
   archive and the target C/C++ runtime libraries.
 
-Validation is on Linux x86_64 with Zig 0.16. HTTP/2 exchange tests use an
-in-memory nghttp2 client; they do not establish independent interoperability.
-HTTP/3 handshakes and the complete release target matrix remain unverified.
+Validation is on Linux x86_64 with Zig 0.16. HTTP/2 has curl and h2spec gates
+in addition to codec tests. HTTP/3 now has curl and independent aioquic gates.
+The complete release target matrix remains unverified.
 AWS-LC remains pinned as an alternative source dependency with no active build
 adapter; the earlier standalone validation scripts were removed.
 
@@ -175,3 +175,39 @@ second stream, PING, cancellation, and a late response in bridge/direct modes
 over cleartext and TLS. It does not require h2spec. Request bodies are still
 buffered before dispatch (32 MiB limit); responses are buffered (4 MiB limit).
 Streaming body parity and broader memory/backpressure limits need further work.
+
+## HTTP/3 runtime status
+
+The initial runtime uses one native UDP thread to own ngtcp2 connections,
+BoringSSL sessions, nghttp3 streams, expiry processing and response progress.
+It accepts QUIC v1, routes connection IDs, opens control/QPACK streams, returns
+flow-control credit, tracks accepted and acknowledged output, and releases UDP
+on shutdown. Admission is limited to 128 connections with 100 simultaneous
+request streams per connection. Handshakes time out after 10 seconds; idle
+connections after 30 seconds. Active migration is disabled in transport
+parameters. HTTP/1 and HTTP/2 advertise a live listener through Alt-Svc.
+
+HTTP/2 and HTTP/3 share `proxy_request.zig`, preserving the frame codec and
+asynchronous bridge/direct handler progress. Requests remain buffered up to
+32 MiB and responses up to 4 MiB. These are per-stream limits, not a global
+memory budget.
+
+Run the independent client gate explicitly (Python dependency is test-only):
+
+```sh
+python3 -m venv /tmp/server-native-quic-client
+/tmp/server-native-quic-client/bin/pip install aioquic==1.3.0
+AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart
+```
+
+Curl must support HTTP/3. The aioquic cases are reported as skipped when
+`AIOQUIC_PYTHON` is absent. The tests cover uploads, concurrent handler progress,
+reset and late replies, reuse beyond the initial stream allowance, malformed
+UDP input, Alt-Svc, and UDP release in bridge/direct modes.
+
+**Step 11 remains open.** Remaining production gates include packet-loss and
+reordering tests, migration-disabled path tests, staged HTTP/3 GOAWAY/draining,
+address-validation/Retry policy, aggregate memory/backpressure budgets, full
+streaming bodies, IPv6/shared UDP routing, and sustained lifecycle/resource
+stress. Shutdown currently emits CONNECTION_CLOSE and frees state; it does
+not implement the complete QUIC closing/draining retention period.
