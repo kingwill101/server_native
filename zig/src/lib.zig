@@ -23,7 +23,9 @@ test "reports the active Zig transport ABI version" {
     try std.testing.expectEqual(@as(c_int, 1), server_native_transport_version());
 }
 
-test "loads the bridge protocol implementation" {
+test "loads internal Zig modules" {
     const bridge_protocol = @import("bridge_protocol.zig");
+    const event_queue = @import("event_queue.zig");
     std.testing.refAllDecls(bridge_protocol);
+    std.testing.refAllDecls(event_queue);
 }
