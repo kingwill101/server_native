@@ -1,0 +1,43 @@
+.{
+    .name = .server_native_zig,
+    .version = "0.1.0",
+    .fingerprint = 0xa20f0f2ff9932678,
+    .minimum_zig_version = "0.16.0",
+    // The normal build resolves the protocol stack and BoringSSL. AWS-LC is experimental.
+    .dependencies = .{
+        .nghttp2 = .{
+            .url = "https://github.com/nghttp2/nghttp2/archive/refs/tags/v1.70.0.tar.gz",
+            .hash = "N-V-__8AAMY8WQCJ3fDlVEj8W7OKIlN3eeVxNoNRLdVuT8IQ",
+            .lazy = true,
+        },
+        .ngtcp2 = .{
+            .url = "https://github.com/ngtcp2/ngtcp2/archive/refs/tags/v1.25.0.tar.gz",
+            .hash = "N-V-__8AAGRJQwAAgW_SMRLhEwr1ZQaH-oJp4VWQTLZanCNf",
+            .lazy = true,
+        },
+        .nghttp3 = .{
+            .url = "https://github.com/ngtcp2/nghttp3/releases/download/v1.18.0/nghttp3-1.18.0.tar.xz",
+            .hash = "N-V-__8AACIRMQC5n2gMbQs6uNoXpnY00q7K_3ePaRDb3r0s",
+            .lazy = true,
+        },
+        .boringssl = .{
+            .url = "https://github.com/allyourcodebase/boringssl/archive/1908fc17e8f24e29088b527ab476396981aecbab.tar.gz",
+            .hash = "boringssl-0.20260526.0-EhtkNf05AABupPrkwFR0r2ve3nQtvOVvBNNFPM0Sstxe",
+            .lazy = true,
+        },
+        .aws_lc = .{
+            .url = "https://github.com/aws/aws-lc/archive/refs/tags/v5.10.0.tar.gz",
+            .hash = "N-V-__8AAOGo3RKUsEKeiDYVpAcMSpP9jaSZrP7gl88qMDM5",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "DEPENDENCIES.md",
+        "include",
+        "src",
+        "build.zig",
+        "protocol_sources.zig",
+        "protocol_dependencies.zig",
+        "build.zig.zon",
+    },
+}

@@ -1,5 +1,9 @@
 const std = @import("std");
 
+// Zig-only adapters; no new C exports or Dart bindings.
+pub const http2 = @import("http2.zig");
+pub const http3 = @import("http3.zig");
+
 const c = @cImport({
     @cInclude("dart_api_dl.h");
 });
@@ -122,6 +126,7 @@ test "reports the active Zig transport ABI version" {
 }
 
 test "loads internal Zig modules" {
+    _ = @import("protocol_test.zig");
     const bridge_protocol = @import("bridge_protocol.zig");
     const event_queue = @import("event_queue.zig");
     std.testing.refAllDecls(bridge_protocol);

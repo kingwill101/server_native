@@ -1,0 +1,131 @@
+# Native protocol dependencies
+
+`build.zig.zon` pins source archives by version or commit and Zig content hash.
+The normal `zig build` resolves and compiles nghttp2, ngtcp2, nghttp3, BoringSSL,
+and ngtcp2's BoringSSL crypto adapter. They are attached to both the static and
+shared `server_native_zig` outputs and the runtime test build. Source archives
+are cached under `zig-pkg/`, which is ignored by Git.
+
+The Dart `hook/build.dart` already invokes `ZigBuilder`, so package builds use
+this same dependency graph automatically. No manual CMake step is needed for
+the normal build. AWS-LC remains a lazy source dependency for future comparison.
+
+```sh
+cd zig
+zig build
+zig build test
+```
+
+This makes the libraries and C headers available to the Zig runtime; it does
+not yet implement HTTP/2, HTTP/3, or TLS listeners. Unused archive members can
+be omitted by the linker until the runtime references them. To prefetch every
+pinned dependency, including AWS-LC, use `zig build --fetch=all`.
+
+| Dependency | Pin | Packaging | Intended use |
+| --- | --- | --- | --- |
+| `nghttp2` | 1.70.0 | Upstream C sources | HTTP/2 sessions and flow control |
+| `ngtcp2` | 1.25.0 | Upstream C sources | QUIC transport |
+| `nghttp3` | 1.18.0 | Official release tarball including sfparse | HTTP/3 streams and QPACK |
+| `boringssl` | allyourcodebase commit `1908fc17e8f24e29088b527ab476396981aecbab` | Zig 0.16 build package, BoringSSL 0.20260526.0 | TLS/ALPN and QUIC TLS candidate |
+| `aws_lc` | 5.10.0 | Upstream C/C++ sources | Alternative TLS candidate |
+
+## Build integration
+
+The [allyourcodebase repository catalog](https://github.com/orgs/allyourcodebase/repositories)
+was checked for existing build packages. Its
+[BoringSSL package](https://github.com/allyourcodebase/boringssl/tree/1908fc17e8f24e29088b527ab476396981aecbab)
+provides `ssl`, `crypto`, and `bcm` artifacts plus the named path `ssl_include`.
+It does not provide a ready-made Zig binding module. Use generated C bindings
+against those headers when implementing the TLS adapter. Its upstream source,
+patch tooling, NASM, and GoogleTest dependencies are pinned by its own manifest.
+
+`protocol_dependencies.zig` is the shared build adapter used by the normal
+runtime and its tests. It compiles the pinned protocol source
+lists, generates version headers, supplies platform feature macros, and links
+ngtcp2's crypto adapter with BoringSSL. All protocol and BoringSSL archives use
+PIC so they can be linked into the shared Dart native asset. Target and
+optimization settings are forwarded from the parent build. The shared asset
+links these archives normally; `zig ar` flattens their members into the installed
+static archive so static consumers do not need separate protocol/TLS archives.
+Static consumers still need the target C/C++ runtime libraries.
+
+BoringSSL is the integrated build provider. AWS-LC is not linked into the
+normal build. The target matrix has not
+yet been validated beyond Linux x86_64; in particular the upstream BoringSSL
+wrapper's Windows limitations still apply. Keep each library's license with
+redistributed source or binary artifacts.
+
+## Internal Zig adapters
+
+`src/lib.zig` exposes `http2` and `http3` to Zig code only. No new C exports,
+Dart bindings, or Dart configuration options are added, and the existing
+HTTP/1 listener does not dispatch to these modules yet.
+
+`http2.Session` owns an nghttp2 server session at a stable allocation address.
+It accepts fragmented input, emits borrowed header/DATA/lifecycle events,
+serializes output, copies finite response bodies into bounded storage, and
+supports stream reset and GOAWAY. The application explicitly calls `consume`
+after consuming request DATA to return flow-control credit. Sink callbacks must
+copy retained data and must not reenter the session. Sink failure terminates
+the connection; it is not a queue-full retry mechanism. The future transport
+must pause socket reads when its bounded event queue is full. Response bodies
+are currently submitted whole, not as asynchronous streaming producers.
+
+`http3.Connection` wraps an nghttp3 server connection, validates server control
+stream IDs, accepts stream bytes, exposes output vectors, and tracks bytes
+accepted/acknowledged by QUIC. Fatal receive/output failures prevent further
+operations. Its receive return value is flow-control credit and excludes DATA
+reported through nghttp3 callbacks. Borrowed output must be passed to QUIC
+before another connection operation.
+
+`http3.QuicConfig` provides bounded transport defaults with active migration
+disabled and serializes transport parameters through ngtcp2. Server CID-specific
+parameters must be populated per connection. `http3.TlsContext` owns a BoringSSL
+QUIC context, selects h3 ALPN, loads PEM credentials, and creates owned TLS
+sessions. The connection owner must attach `ngtcp2_crypto_conn_ref` before
+driving a handshake. UDP sockets, the ngtcp2 connection driver, timers,
+retransmission, certificate-backed handshakes, and request/frame mapping are
+still future integration work. These owning values must not be copied or
+shared concurrently between threads.
+
+## Tests
+
+Run `zig build test`. The suite covers the following cases on Linux x86_64.
+`zig build test install` also verifies both library outputs. Coverage includes:
+
+- Pinned library versions.
+- HTTP/2 fragmentation boundaries, negotiated concurrency limits, stream churn,
+  aggregate response budgets, copied body/header ownership, peer cancellation,
+  invalid input, callback failures, and receive/send flow-control stalls.
+- Allocation-failure injection across Zig session/response, queue, and descriptor
+  ownership paths; native C-library allocation failures are not injected.
+- HTTP/3 one-byte QPACK request decoding, callback failure, partial output
+  accounting, critical and unknown stream closure, duplicate control streams,
+  and QUIC stream-ID bounds.
+- Transport-parameter varint boundaries, exact output-buffer sizes, ALPN offer
+  matrices, TLS lifetimes, and matching/mismatched PEM credential fixtures.
+- Queue wraparound, byte/slot limits, and four concurrent producers delivering
+  800 events exactly once while preserving each producer's ordering.
+- Deterministic randomized binary frame round trips, truncated descriptors,
+  hostile lengths/counts, and tokenized-header size accounting.
+- Linking the runtime and protocol/TLS APIs using only the bundled static
+  archive and the target C/C++ runtime libraries.
+
+Validation is on Linux x86_64 with Zig 0.16. HTTP/2 exchange tests use an
+in-memory nghttp2 client; they do not establish independent interoperability.
+HTTP/3 handshakes and the complete release target matrix remain unverified.
+AWS-LC remains pinned as an alternative source dependency with no active build
+adapter; the earlier standalone validation scripts were removed.
+
+The initial nghttp3 GitHub tag archive omitted `lib/sfparse`, a required git
+submodule. Compilation exposed that gap; the manifest now pins the official
+release tarball, which includes the source. Preserve that packaging choice on
+updates unless sfparse is separately pinned and wired into the build.
+
+## Updating pins
+
+Choose an explicit upstream release or wrapper commit, run `zig fetch <url>`
+from this directory, and update both `.url` and `.hash`. Review wrapper manifests
+for transitive source/version changes. Then run `zig build --fetch=all`,
+`zig build` and `zig build test`, plus protocol interop checks as those are added.
+Do not replace pins with moving branch URLs or alter the package fingerprint when updating dependencies.
