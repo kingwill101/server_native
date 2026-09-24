@@ -33,9 +33,9 @@ export fn server_native_zig_queue_create(slot_capacity: usize) ?*anyopaque {
 }
 
 export fn server_native_zig_queue_destroy(handle: ?*anyopaque) void {
-    const opaque = handle orelse return;
+    const opaque_handle = handle orelse return;
     const event_queue = @import("event_queue.zig");
-    const queue: *event_queue.Queue = @ptrCast(@alignCast(opaque));
+    const queue: *event_queue.Queue = @ptrCast(@alignCast(opaque_handle));
     queue.deinit();
     std.heap.c_allocator.destroy(queue);
 }
