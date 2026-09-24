@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const bridge_protocol = @import("bridge_protocol.zig");
-
 const c = @cImport({
     @cInclude("dart_api_dl.h");
 });
@@ -26,5 +24,6 @@ test "reports the active Zig transport ABI version" {
 }
 
 test "loads the bridge protocol implementation" {
+    const bridge_protocol = @import("bridge_protocol.zig");
     std.testing.refAllDecls(bridge_protocol);
 }
