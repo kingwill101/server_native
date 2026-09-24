@@ -58,9 +58,17 @@ final class _ProxyConnectionCounters {
 /// On non-Unix hosts this always uses loopback TCP.
 Future<_BridgeBinding> _bindBridgeServer() async {
   if (Platform.isLinux || Platform.isMacOS) {
-    final path = _bridgeUnixSocketPath();
-    final unixAddress = InternetAddress(path, type: InternetAddressType.unix);
+    Directory? directory;
+    String? path;
     try {
+      // Reserve a namespace atomically across isolates and processes. A timestamp
+      // alone can collide, and failed-bind cleanup must never unlink a peer.
+      directory = await Directory.systemTemp.createTemp(
+        'server_native_bridge_',
+      );
+      final ownedDirectory = directory;
+      path = '${directory.path}/bridge.sock';
+      final unixAddress = InternetAddress(path, type: InternetAddressType.unix);
       final server = await ServerSocket.bind(unixAddress, 0);
       return _BridgeBinding(
         server: server,
@@ -71,10 +79,7 @@ Future<_BridgeBinding> _bindBridgeServer() async {
         dispose: () async {
           await server.close();
           try {
-            final file = File(path);
-            if (await file.exists()) {
-              await file.delete();
-            }
+            await ownedDirectory.delete(recursive: true);
           } catch (_) {}
         },
       );
@@ -83,10 +88,7 @@ Future<_BridgeBinding> _bindBridgeServer() async {
         '[server_native] unix bridge bind failed ($path): $error; falling back to loopback tcp.',
       );
       try {
-        final file = File(path);
-        if (await file.exists()) {
-          await file.delete();
-        }
+        await directory?.delete(recursive: true);
       } catch (_) {}
     }
   }
@@ -100,13 +102,6 @@ Future<_BridgeBinding> _bindBridgeServer() async {
     backendPath: null,
     dispose: () => server.close(),
   );
-}
-
-/// Returns the temporary Unix-domain socket path used for bridge transport.
-String _bridgeUnixSocketPath() {
-  final tempDir = Directory.systemTemp.path;
-  final timestamp = DateTime.now().microsecondsSinceEpoch;
-  return '$tempDir/server_native_bridge_${pid}_$timestamp.sock';
 }
 
 /// Handles one accepted bridge socket from the native Rust transport.
