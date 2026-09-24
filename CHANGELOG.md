@@ -13,6 +13,8 @@ All notable changes to `server_native` will be documented in this file.
 
 ## 0.1.3+1
 
+- Port tokenized request-start and header encoding to the Zig bridge protocol.
+
 - Add the first Zig bridge-protocol parity layer with bounded frame encoding and decoding.
 
 - Fixed native-callback direct frame handling in `server_boot_proxy_direct.dart` to avoid routing single-frame direct requests through the stream path, improving shelf compatibility stability under repeated request/response cycles.

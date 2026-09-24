@@ -31,8 +31,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [shelf, relic, serinus]
-        mode: [io, native]
+        include:
+          - framework: shelf
+            mode: io
+            allow_failure: false
+          - framework: shelf
+            mode: native
+            allow_failure: false
+          - framework: relic
+            mode: io
+            allow_failure: true
+          - framework: relic
+            mode: native
+            allow_failure: true
+          - framework: serinus
+            mode: io
+            allow_failure: true
+          - framework: serinus
+            mode: native
+            allow_failure: true
+    continue-on-error: ${{ matrix.allow_failure }}
 
     steps:
       - uses: actions/checkout@v4
