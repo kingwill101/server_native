@@ -15,9 +15,26 @@ pub const Event = struct {
     payload: []u8,
 };
 
+const SpinMutex = struct {
+    state: std.atomic.Value(u8) = .init(0),
+
+    fn lock(self: *SpinMutex) void {
+        while (self.state.cmpxchgWeak(
+            0,
+            1,
+            .acquire,
+            .monotonic,
+        ) != null) {}
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.state.store(0, .release);
+    }
+};
+
 pub const Queue = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: SpinMutex = .{},
     slots: []?Event,
     head: usize = 0,
     len: usize = 0,
@@ -82,6 +99,11 @@ pub const Queue = struct {
     pub fn push(self: *Queue, request_id: i64, payload: []const u8) Error!void {
         if (payload.len > self.byte_limit) return error.PayloadTooLarge;
 
+        const owned = self.allocator.dupe(u8, payload) catch {
+            return error.OutOfMemory;
+        };
+        errdefer self.allocator.free(owned);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -91,9 +113,6 @@ pub const Queue = struct {
             return error.QueueFull;
         }
 
-        const owned = self.allocator.dupe(u8, payload) catch {
-            return error.OutOfMemory;
-        };
         const tail = (self.head + self.len) % self.slots.len;
         self.slots[tail] = .{
             .request_id = request_id,
