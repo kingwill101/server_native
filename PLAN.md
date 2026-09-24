@@ -58,9 +58,9 @@ Initial scan found:
 - [x] Define the Zig ABI and lifecycle ownership rules, including `Dart_InitializeApiDL`, opaque handles, start/stop idempotence, direct request polling, response submission, allocation ownership, and shutdown ordering.
 - [x] Add backend-neutral `NativeProxyServer` dispatch with runtime-env > compile-time-define > Rust-default precedence; invalid values fail clearly and explicit Zig selection never silently falls back.
 - [x] Complete Zig queue notification and batched request/response FFI paths, replacing the current test-only `server_native_zig_queue_*` surface with the shared `server_native_*` proxy ABI where appropriate.
-- [ ] Port bridge transport behavior and frame compatibility, including TCP/Unix modes, length-prefix framing, tokenized headers, streaming request/response bodies, backpressure, and tunnel frames.
-- [ ] Milestone 1 / HTTP/1: implement Zig TCP/Unix listeners and HTTP/1 parsing/writing, starting with `/health`, then parity for bridge/direct modes, keep-alive, chunked bodies, WebSocket upgrades, graceful shutdown, IPv6/shared binding, and TLS HTTP/1.
-- [ ] Gate HTTP/1 on the existing Dart/framework suites, direct/bridge differential tests, curl interoperability, and shutdown stress tests.
+- [x] Port bridge transport behavior and frame compatibility, including TCP/Unix modes, length-prefix framing, tokenized headers, streaming request/response bodies, backpressure, and tunnel frames.
+- [x] Milestone 1 / HTTP/1: implement Zig TCP/Unix listeners and HTTP/1 parsing/writing, starting with `/health`, then parity for bridge/direct modes, keep-alive, chunked bodies, WebSocket upgrades, graceful shutdown, IPv6/shared binding, and TLS HTTP/1.
+- [x] Gate HTTP/1 on the existing Dart/framework suites, direct/bridge differential tests, curl interoperability, and shutdown stress tests.
 - [ ] Milestone 2 / HTTP/2: integrate `nghttp2` through Zig C interop, add TLS/ALPN, map streams to the shared frame model, implement flow-control backpressure, cancellation, and concurrent streams, then validate with curl and `h2spec`.
 - [ ] Milestone 3 / HTTP/3: integrate `ngtcp2` + `nghttp3` with the selected QUIC-capable TLS provider, add Alt-Svc, UDP lifecycle, stream reset, graceful close, and independent curl/QUIC interoperability tests.
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.

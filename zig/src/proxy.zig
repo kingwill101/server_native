@@ -3,6 +3,7 @@ const abi = @import("abi.zig");
 const event_queue = @import("event_queue.zig");
 const bridge_protocol = @import("bridge_protocol.zig");
 const proxy_http1 = @import("proxy_http1.zig");
+const proxy_http2 = @import("proxy_http2.zig");
 const http1 = @import("http1.zig").posix;
 
 const c = abi.c;
@@ -40,6 +41,8 @@ pub const ProxyServer = struct {
     backend_host: []const u8 = &.{},
     backend_path: []const u8 = &.{},
     backend_port: u16 = 0,
+    tls: ?http1.TlsContext = null,
+    http2_enabled: bool = false,
 
     pub fn create(config: *const c.ServerNativeProxyConfig, out_port: *u16) ?*ProxyServer {
         const allocator = std.heap.c_allocator;
@@ -54,13 +57,28 @@ pub const ProxyServer = struct {
             config.backlog,
             config.shared != 0,
         ) catch return null;
+        var tls: ?http1.TlsContext = null;
+        if (config.tls_cert_path != null or config.tls_key_path != null) {
+            if (config.tls_cert_path == null or config.tls_key_path == null) {
+                var owned_listener = listener;
+                owned_listener.close();
+                return null;
+            }
+            tls = http1.TlsContext.init(std.mem.span(config.tls_cert_path), std.mem.span(config.tls_key_path), config.http2 != 0) catch {
+                var owned_listener = listener;
+                owned_listener.close();
+                return null;
+            };
+        }
         const backend_host = if (config.backend_host) |ptr| allocator.dupe(u8, std.mem.span(ptr)) catch {
+            if (tls) |*context| context.deinit();
             var owned_listener = listener;
             owned_listener.close();
             return null;
         } else &.{};
         const backend_path = if (config.backend_path) |ptr| allocator.dupe(u8, std.mem.span(ptr)) catch {
             allocator.free(@constCast(backend_host));
+            if (tls) |*context| context.deinit();
             var owned_listener = listener;
             owned_listener.close();
             return null;
@@ -71,12 +89,14 @@ pub const ProxyServer = struct {
             owned_listener.close();
             allocator.free(@constCast(backend_host));
             allocator.free(@constCast(backend_path));
+            if (tls) |*context| context.deinit();
             return null;
         };
         queue.* = event_queue.Queue.init(allocator, event_queue.max_queue_slots) catch {
             allocator.destroy(queue);
             allocator.free(@constCast(backend_host));
             allocator.free(@constCast(backend_path));
+            if (tls) |*context| context.deinit();
             return null;
         };
 
@@ -87,6 +107,7 @@ pub const ProxyServer = struct {
             owned_listener.close();
             allocator.free(@constCast(backend_host));
             allocator.free(@constCast(backend_path));
+            if (tls) |*context| context.deinit();
             return null;
         };
         server.* = .{
@@ -99,6 +120,8 @@ pub const ProxyServer = struct {
             .backend_host = backend_host,
             .backend_path = backend_path,
             .backend_port = config.backend_port,
+            .tls = tls,
+            .http2_enabled = config.http2 != 0,
         };
         server.accept_thread = std.Thread.spawn(.{}, acceptLoop, .{server}) catch {
             server.queue.deinit();
@@ -106,6 +129,7 @@ pub const ProxyServer = struct {
             server.listener.close();
             allocator.free(@constCast(server.backend_host));
             allocator.free(@constCast(server.backend_path));
+            if (server.tls) |*context| context.deinit();
             allocator.destroy(server);
             return null;
         };
@@ -135,6 +159,7 @@ pub const ProxyServer = struct {
         self.pending_mutex.unlock();
         self.allocator.free(@constCast(self.backend_host));
         self.allocator.free(@constCast(self.backend_path));
+        if (self.tls) |*context| context.deinit();
         self.allocator.destroy(self);
     }
 
@@ -160,6 +185,12 @@ pub const ProxyServer = struct {
                 if (self.stopped.load(.acquire)) break;
                 continue;
             };
+            if (self.tls) |*context| {
+                connection.acceptTls(context) catch {
+                    connection.close();
+                    continue;
+                };
+            }
             _ = self.active_connections.fetchAdd(1, .acq_rel);
             const thread = std.Thread.spawn(.{}, connectionLoop, .{ self, connection }) catch {
                 connection.close();
@@ -177,10 +208,15 @@ pub const ProxyServer = struct {
             _ = self.active_connections.fetchSub(1, .acq_rel);
         }
 
+        if (self.http2_enabled and (owned_connection.isH2() or owned_connection.hasHttp2Preface())) {
+            proxy_http2.serve(self.allocator, self, &owned_connection) catch {};
+            return;
+        }
         while (!self.stopped.load(.acquire)) {
-            const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection) catch {
+            const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection) catch |err| {
+                if (err == error.InvalidRequest) break;
                 const fallback = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
-                http1.sendAll(owned_connection.fd, fallback) catch {};
+                http1.sendAllConnection(&owned_connection, fallback) catch {};
                 break;
             };
             if (!keep_alive) break;

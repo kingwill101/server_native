@@ -28,6 +28,21 @@ pub const Session = struct {
     failed: bool = false,
     sink_failed: bool = false,
     last_error: c_int = 0,
+    // Bounded tombstones distinguish recently peer-closed streams from streams
+    // reset locally (whose in-flight frames must still be tolerated).
+    peer_closed: [256]i32 = @splat(0),
+    closed_cursor: usize = 0,
+    forgotten_through: i32 = 0,
+    highest_opened: i32 = 0,
+    terminating: bool = false,
+    preface_left: usize = 24,
+    frame_header: [9]u8 = undefined,
+    header_used: usize = 0,
+    payload_left: usize = 0,
+    control_payload: [5]u8 = undefined,
+    control_used: usize = 0,
+    inspect_control: bool = false,
+    header_block_stream: i32 = 0,
     const Body = struct { bytes: []u8, offset: usize = 0 };
 
     /// Allocated at a stable address because nghttp2 retains our callback context.
@@ -68,12 +83,81 @@ pub const Session = struct {
 
     pub fn receive(self: *Session, bytes: []const u8) Error!usize {
         try self.alive();
+        var offset: usize = 0;
+        // Inspect only the fixed-size legacy PRIORITY and WINDOW_UPDATE frames.
+        // All HPACK, stream state, frame sizing and other parsing stays in nghttp2.
+        while (offset < bytes.len and !self.terminating) {
+            if (self.preface_left != 0) {
+                const n = @min(self.preface_left, bytes.len - offset);
+                try self.receiveNative(bytes[offset..][0..n]);
+                self.preface_left -= n;
+                offset += n;
+                continue;
+            }
+            if (self.header_used < 9) {
+                const n = @min(9 - self.header_used, bytes.len - offset);
+                @memcpy(self.frame_header[self.header_used..][0..n], bytes[offset..][0..n]);
+                self.header_used += n;
+                offset += n;
+                if (self.header_used < 9) continue;
+                const kind = self.frame_header[3];
+                const stream: i32 = @intCast(std.mem.readInt(u32, self.frame_header[5..9], .big) & 0x7fffffff);
+                const continuing = self.header_block_stream != 0;
+                if (!continuing) try self.validateFrame(kind, stream);
+                if (self.terminating) break;
+                self.payload_left = std.mem.readInt(u24, self.frame_header[0..3], .big);
+                self.inspect_control = !continuing and ((kind == c.NGHTTP2_PRIORITY and self.payload_left == 5) or
+                    (kind == c.NGHTTP2_WINDOW_UPDATE and self.payload_left == 4));
+                if (kind == c.NGHTTP2_HEADERS and self.frame_header[4] & c.NGHTTP2_FLAG_END_HEADERS == 0)
+                    self.header_block_stream = stream;
+                if (kind == c.NGHTTP2_CONTINUATION and self.frame_header[4] & c.NGHTTP2_FLAG_END_HEADERS != 0)
+                    self.header_block_stream = 0;
+                self.control_used = 0;
+                if (!self.inspect_control) try self.receiveNative(&self.frame_header);
+                if (self.payload_left == 0) self.header_used = 0;
+                continue;
+            }
+            const n = @min(self.payload_left, bytes.len - offset);
+            if (self.inspect_control) {
+                @memcpy(self.control_payload[self.control_used..][0..n], bytes[offset..][0..n]);
+                self.control_used += n;
+            } else try self.receiveNative(bytes[offset..][0..n]);
+            self.payload_left -= n;
+            offset += n;
+            if (self.payload_left == 0) {
+                if (self.inspect_control) try self.receiveControl();
+                self.header_used = 0;
+            }
+        }
+        return bytes.len;
+    }
+
+    fn receiveControl(self: *Session) Error!void {
+        const stream: i32 = @intCast(std.mem.readInt(u32, self.frame_header[5..9], .big) & 0x7fffffff);
+        const value = std.mem.readInt(u32, self.control_payload[0..4], .big) & 0x7fffffff;
+        if (self.frame_header[3] == c.NGHTTP2_PRIORITY and (stream == 0 or stream == value)) {
+            self.terminating = true;
+            try self.check(c.nghttp2_session_terminate_session(self.native, c.NGHTTP2_PROTOCOL_ERROR));
+            return;
+        }
+        if (self.frame_header[3] == c.NGHTTP2_WINDOW_UPDATE and stream > 0 and value > 0) {
+            const window = c.nghttp2_session_get_stream_remote_window_size(self.native, stream);
+            if (window >= 0 and value > @as(u32, @intCast(0x7fffffff - window))) {
+                // Overflow of a stream window must not terminate other streams.
+                try self.reset(stream, c.NGHTTP2_FLOW_CONTROL_ERROR);
+                return;
+            }
+        }
+        try self.receiveNative(&self.frame_header);
+        try self.receiveNative(self.control_payload[0..self.control_used]);
+    }
+
+    fn receiveNative(self: *Session, bytes: []const u8) Error!void {
         const count = c.nghttp2_session_mem_recv2(self.native, bytes.ptr, bytes.len);
         if (count < 0) {
             self.failed = true;
             try self.check(@intCast(count));
         }
-        return @intCast(count);
     }
 
     /// Borrowed output must be written/copied before calling another session method.
@@ -87,6 +171,12 @@ pub const Session = struct {
         }
         if (count == 0) return &.{};
         return bytes[0..@intCast(count)];
+    }
+
+    /// Call only after flushing output to the socket.
+    pub fn finished(self: *Session) bool {
+        return c.nghttp2_session_want_read(self.native) == 0 and
+            c.nghttp2_session_want_write(self.native) == 0;
     }
 
     /// Return receive-window credit only after the application consumes DATA.
@@ -156,8 +246,33 @@ pub const Session = struct {
     fn from(data: ?*anyopaque) *Session {
         return @ptrCast(@alignCast(data.?));
     }
+    fn rememberPeerClosed(self: *Session, stream: i32) void {
+        if (std.mem.indexOfScalar(i32, &self.peer_closed, stream) != null) return;
+        self.forgotten_through = @max(self.forgotten_through, self.peer_closed[self.closed_cursor]);
+        self.peer_closed[self.closed_cursor] = stream;
+        self.closed_cursor = (self.closed_cursor + 1) % self.peer_closed.len;
+    }
+    fn validateFrame(self: *Session, kind: u8, stream: i32) Error!void {
+        var code: ?u32 = null;
+        if (kind == c.NGHTTP2_PRIORITY and stream == 0) code = c.NGHTTP2_PROTOCOL_ERROR;
+        if (stream > 0 and (kind == c.NGHTTP2_HEADERS or kind == c.NGHTTP2_DATA)) {
+            if (std.mem.indexOfScalar(i32, &self.peer_closed, stream) != null) {
+                code = c.NGHTTP2_STREAM_CLOSED;
+            } else if (kind == c.NGHTTP2_HEADERS and stream < self.highest_opened and
+                stream > self.forgotten_through and c.nghttp2_session_get_stream_remote_close(self.native, stream) == -1)
+            {
+                code = c.NGHTTP2_PROTOCOL_ERROR;
+            }
+        }
+        if (code) |error_code| {
+            self.terminating = true;
+            try self.check(c.nghttp2_session_terminate_session(self.native, error_code));
+        }
+    }
     fn onBegin(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, data: ?*anyopaque) callconv(.c) c_int {
-        return from(data).emit(.{ .headers_begin = frame.*.hd.stream_id });
+        const self = from(data);
+        self.highest_opened = @max(self.highest_opened, frame.*.hd.stream_id);
+        return self.emit(.{ .headers_begin = frame.*.hd.stream_id });
     }
     fn onHeader(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, name: [*c]const u8, namelen: usize, value: [*c]const u8, valuelen: usize, _: u8, data: ?*anyopaque) callconv(.c) c_int {
         return from(data).emit(.{ .header = .{ .stream = frame.*.hd.stream_id, .field = .{ .name = name[0..namelen], .value = value[0..valuelen] } } });
@@ -169,8 +284,11 @@ pub const Session = struct {
             const result = self.emit(.{ .headers_end = hd.stream_id });
             if (result != 0) return result;
         }
-        if ((hd.type == c.NGHTTP2_HEADERS or hd.type == c.NGHTTP2_DATA) and hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0)
+        if (hd.type == c.NGHTTP2_RST_STREAM) self.rememberPeerClosed(hd.stream_id);
+        if ((hd.type == c.NGHTTP2_HEADERS or hd.type == c.NGHTTP2_DATA) and hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0) {
+            self.rememberPeerClosed(hd.stream_id);
             return self.emit(.{ .end_stream = hd.stream_id });
+        }
         return 0;
     }
     fn onData(_: ?*c.nghttp2_session, _: u8, stream: i32, bytes: [*c]const u8, len: usize, data: ?*anyopaque) callconv(.c) c_int {
@@ -178,6 +296,8 @@ pub const Session = struct {
     }
     fn onClose(_: ?*c.nghttp2_session, stream: i32, code: u32, data: ?*anyopaque) callconv(.c) c_int {
         const self = from(data);
+        if (code != c.NGHTTP2_NO_ERROR and std.mem.indexOfScalar(i32, &self.peer_closed, stream) == null)
+            self.forgotten_through = @max(self.forgotten_through, stream);
         if (self.bodies.fetchRemove(stream)) |entry| {
             self.queued_bytes -= entry.value.bytes.len;
             self.freeBody(entry.value);
@@ -595,4 +715,99 @@ test "HTTP2 negotiated concurrent stream limit defers additional requests" {
     try server.respond(second, 200, &.{}, "second");
     try client.fromServer(server);
     try std.testing.expectEqualStrings("firstsecond", client.received.items);
+}
+
+fn expectControl(session: *Session, kind: u8, stream: u32, code: u32) !void {
+    while (true) {
+        const bytes = try session.output();
+        if (bytes.len == 0) return error.MissingControlFrame;
+        var offset: usize = 0;
+        while (bytes.len - offset >= 9) {
+            const length: usize = std.mem.readInt(u24, bytes[offset..][0..3], .big);
+            try std.testing.expect(bytes.len - offset >= 9 + length);
+            if (bytes[offset + 3] == kind) {
+                try std.testing.expectEqual(stream, std.mem.readInt(u32, bytes[offset + 5 ..][0..4], .big));
+                const code_offset: usize = if (kind == c.NGHTTP2_GOAWAY) 13 else 9;
+                try std.testing.expectEqual(code, std.mem.readInt(u32, bytes[offset + code_offset ..][0..4], .big));
+                return;
+            }
+            offset += 9 + length;
+        }
+    }
+}
+
+test "HTTP2 fragmented legacy PRIORITY rejects self dependency" {
+    const wire = [_]u8{ 0, 0, 5, 2, 0, 0, 0, 0, 1, 0, 0, 0, 1, 15 };
+    for (1..wire.len + 1) |fragment| {
+        var probe = Probe{};
+        const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+        defer server.destroy();
+        var client = Client{};
+        try client.init();
+        defer client.deinit();
+        try client.toServer(server);
+        var offset: usize = 0;
+        while (offset < wire.len) {
+            const count = @min(fragment, wire.len - offset);
+            _ = try server.receive(wire[offset..][0..count]);
+            offset += count;
+        }
+        try expectControl(server, c.NGHTTP2_GOAWAY, 0, c.NGHTTP2_PROTOCOL_ERROR);
+        try std.testing.expect(server.finished());
+    }
+}
+
+test "HTTP2 peer end and reset reject subsequent DATA" {
+    for ([_]bool{ false, true }) |reset_peer| {
+        var probe = Probe{};
+        const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+        defer server.destroy();
+        var client = Client{};
+        try client.init();
+        defer client.deinit();
+        const stream = try client.request();
+        try client.toServer(server);
+        if (reset_peer) {
+            try std.testing.expectEqual(@as(c_int, 0), c.nghttp2_submit_rst_stream(client.native, 0, stream, c.NGHTTP2_CANCEL));
+            try client.toServer(server);
+        }
+        _ = try server.receive(&.{ 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+        try expectControl(server, c.NGHTTP2_GOAWAY, 0, c.NGHTTP2_STREAM_CLOSED);
+        try std.testing.expect(server.finished());
+    }
+}
+
+test "HTTP2 stream window overflow resets only that stream" {
+    var probe = Probe{};
+    const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+    defer server.destroy();
+    var client = Client{};
+    try client.init();
+    defer client.deinit();
+    const first = try client.request();
+    const second = try client.request();
+    try client.toServer(server);
+    try client.fromServer(server);
+    try client.toServer(server);
+    // The peer's initial 65535 window plus 2^31-1 exceeds the stream maximum.
+    const wire = [_]u8{ 0, 0, 4, 8, 0, 0, 0, 0, 1, 127, 255, 255, 255 };
+    for (wire) |byte| _ = try server.receive(&.{byte});
+    try expectControl(server, c.NGHTTP2_RST_STREAM, @intCast(first), c.NGHTTP2_FLOW_CONTROL_ERROR);
+    try std.testing.expect(!server.finished());
+    try server.respond(second, 200, &.{}, "still open");
+    try client.fromServer(server);
+    try std.testing.expectEqualStrings("still open", client.received.items);
+}
+
+test "HTTP2 control inspection cannot bypass required CONTINUATION" {
+    var probe = Probe{};
+    const server = try Session.create(std.testing.allocator, probe.sink(), .{});
+    defer server.destroy();
+    var client = Client{};
+    try client.init();
+    defer client.deinit();
+    try client.toServer(server);
+    _ = try server.receive(&.{ 0, 0, 3, 1, 1, 0, 0, 0, 1, 0x82, 0x87, 0x84 });
+    _ = try server.receive(&.{ 0, 0, 4, 8, 0, 0, 0, 0, 1, 127, 255, 255, 255 });
+    try expectControl(server, c.NGHTTP2_GOAWAY, 0, c.NGHTTP2_PROTOCOL_ERROR);
 }

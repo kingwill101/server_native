@@ -16,9 +16,10 @@ zig build
 zig build test
 ```
 
-This makes the libraries and C headers available to the Zig runtime; it does
-not yet implement HTTP/2, HTTP/3, or TLS listeners. Unused archive members can
-be omitted by the linker until the runtime references them. To prefetch every
+The build makes the libraries and C headers available to the Zig runtime.
+HTTP/2 runtime integration and TLS HTTP/1 support are implemented; HTTP/3
+listeners remain unimplemented. Unused archive members can be omitted by
+the linker until the runtime references them. To prefetch every
 pinned dependency, including AWS-LC, use `zig build --fetch=all`.
 
 | Dependency | Pin | Packaging | Intended use |
@@ -59,7 +60,8 @@ redistributed source or binary artifacts.
 
 `src/lib.zig` exposes `http2` and `http3` to Zig code only. No new C exports,
 Dart bindings, or Dart configuration options are added, and the existing
-HTTP/1 listener does not dispatch to these modules yet.
+listener dispatches HTTP/2 connections to the internal session adapter. HTTP/3
+remains an internal adapter without a network listener.
 
 `http2.Session` owns an nghttp2 server session at a stable allocation address.
 It accepts fragmented input, emits borrowed header/DATA/lifecycle events,
@@ -90,7 +92,7 @@ shared concurrently between threads.
 
 ## Tests
 
-Run `zig build test`. The suite currently passes 65 tests on Linux x86_64.
+Run `zig build test`. The suite covers the cases below on Linux x86_64.
 `zig build test install` also verifies both library outputs. Coverage includes:
 
 - Pinned library versions.
@@ -129,3 +131,25 @@ from this directory, and update both `.url` and `.hash`. Review wrapper manifest
 for transitive source/version changes. Then run `zig build --fetch=all`,
 `zig build` and `zig build test`, plus protocol interop checks as those are added.
 Do not replace pins with moving branch URLs or alter the package fingerprint when updating dependencies.
+
+## HTTP/2 conformance gate
+
+The HTTP/2 runtime is in `src/proxy_http2.zig`; HTTP/1 and HTTP/2 share
+`src/bridge_io.zig`. Run the external gate against real Dart handlers with:
+
+```sh
+H2SPEC=/path/to/h2spec SERVER_NATIVE_BACKEND=zig \
+  dart test test/http2_runtime_test.dart
+```
+
+This runs h2spec in bridge/direct modes over prior-knowledge cleartext and TLS
+ALPN, followed by curl upload/query checks. It requires h2spec and a curl build
+with HTTP/2 support. The tests are explicitly skipped when H2SPEC is unset.
+
+The adapter keeps bounded recent peer-closed stream IDs, validates legacy
+PRIORITY control frames, and turns stream-window overflow into RST_STREAM
+without closing unrelated streams. HPACK and general frame validation remain
+owned by nghttp2. Control inspection must not bypass CONTINUATION requirements.
+Connection teardown follows nghttp2's read/write interest after output is flushed.
+Passing h2spec alone does not prove cancellation while a Dart handler is pending,
+concurrent handler progress, or streaming/backpressure parity for the runtime.

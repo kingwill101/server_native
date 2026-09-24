@@ -1,5 +1,6 @@
 const std = @import("std");
 const bridge_protocol = @import("bridge_protocol.zig");
+const bridge_io = @import("bridge_io.zig");
 const http1 = @import("http1.zig").posix;
 
 pub const max_header_bytes: usize = 64 * 1024;
@@ -22,7 +23,7 @@ pub fn serveConnection(
     var chunked_body = false;
 
     while (header_end == null) {
-        const count = try http1.receive(connection.fd, &scratch);
+        const count = try http1.receiveConnection(connection, &scratch);
         if (count == 0) return false;
         try input.appendSlice(allocator, scratch[0..count]);
         if (input.items.len > max_header_bytes) return error.HeadersTooLarge;
@@ -39,7 +40,7 @@ pub fn serveConnection(
     while ((chunked_body and std.mem.indexOf(u8, input.items[header_end.?..], "\r\n0\r\n\r\n") == null) or
         (!chunked_body and input.items.len < header_end.? + content_length))
     {
-        const count = (try http1.receiveTimeout(connection.fd, &scratch, 50)) orelse {
+        const count = (try http1.receiveTimeoutConnection(connection, &scratch, 50)) orelse {
             idle_body_reads += 1;
             if (idle_body_reads >= 20) return error.RequestBodyTimeout;
             continue;
@@ -115,17 +116,8 @@ pub fn serveConnection(
     _ = try bridge_protocol.encodeTerminal(.request_end, &terminal);
     try server.queue.push(@bitCast(request_id), &terminal);
 
-    var response_headers: std.ArrayList(bridge_protocol.Header) = .empty;
-    defer {
-        for (response_headers.items) |header| {
-            allocator.free(header.name);
-            allocator.free(header.value);
-        }
-        response_headers.deinit(allocator);
-    }
-    var response_body: std.ArrayList(u8) = .empty;
-    defer response_body.deinit(allocator);
-    var response_status: u16 = 500;
+    var response = bridge_io.Response{};
+    defer response.deinit(allocator);
     var response_done = false;
     while (!response_done and !server.stopped.load(.acquire)) {
         const frame = server.takeResponse(request_id) orelse {
@@ -133,22 +125,15 @@ pub fn serveConnection(
             continue;
         };
         defer allocator.free(frame);
-        try decodeResponseFrame(
-            allocator,
-            frame,
-            &response_status,
-            &response_headers,
-            &response_body,
-            &response_done,
-        );
-        if (upgrade and response_status == 101) {
-            try writeUpgradeResponse(allocator, connection.fd, response_status, response_headers.items);
-            try runDirectTunnel(allocator, server, request_id, connection.fd);
+        try bridge_io.decodeResponseFrame(allocator, frame, &response, &response_done);
+        if (upgrade and response.status == 101) {
+            try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
+            try runDirectTunnel(allocator, server, request_id, connection);
             return false;
         }
     }
     if (!response_done) return error.ResponseUnavailable;
-    try writeHttpResponse(allocator, connection.fd, response_status, response_headers.items, response_body.items, keep_alive);
+    try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
 }
 
@@ -170,56 +155,32 @@ fn serveBridge(
     const request = try allocator.alloc(u8, start_len + 4 + body.len);
     defer allocator.free(request);
     _ = try bridge_protocol.encodeRequest(head, body, request);
-    try sendWireFrame(allocator, backend.fd, request);
+    try bridge_io.sendFrame(allocator, backend.fd, request);
 
-    var response_headers: std.ArrayList(bridge_protocol.Header) = .empty;
-    defer {
-        for (response_headers.items) |header| {
-            allocator.free(header.name);
-            allocator.free(header.value);
-        }
-        response_headers.deinit(allocator);
-    }
-    var response_body: std.ArrayList(u8) = .empty;
-    defer response_body.deinit(allocator);
-    var status: u16 = 500;
+    var response = bridge_io.Response{};
+    defer response.deinit(allocator);
     var done = false;
     while (!done) {
-        var length_bytes: [4]u8 = undefined;
-        try receiveExact(backend.fd, &length_bytes);
-        const length = readWireU32(length_bytes[0..]);
-        if (length > bridge_protocol.max_frame_bytes) return error.FrameTooLarge;
-        const payload = try allocator.alloc(u8, length);
+        const payload = try bridge_io.receiveFrame(allocator, backend.fd);
         defer allocator.free(payload);
-        try receiveExact(backend.fd, payload);
-        try decodeResponseFrame(allocator, payload, &status, &response_headers, &response_body, &done);
-        if (upgrade and status == 101 and (payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start) or payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start_tokenized))) {
-            try writeUpgradeResponse(allocator, connection.fd, status, response_headers.items);
-            try runTunnel(allocator, server, backend.fd, connection.fd);
+        try bridge_io.decodeResponseFrame(allocator, payload, &response, &done);
+        if (upgrade and response.status == 101 and (payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start) or payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start_tokenized))) {
+            try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
+            try runTunnel(allocator, server, backend.fd, connection);
             return false;
         }
     }
-    if (upgrade and status == 101) {
-        try writeUpgradeResponse(allocator, connection.fd, status, response_headers.items);
-        try runTunnel(allocator, server, backend.fd, connection.fd);
+    if (upgrade and response.status == 101) {
+        try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
+        try runTunnel(allocator, server, backend.fd, connection);
         return false;
     }
-    try writeHttpResponse(allocator, connection.fd, status, response_headers.items, response_body.items, keep_alive);
+    try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
 }
 
-fn sendWireFrame(allocator: std.mem.Allocator, fd: http1.Fd, payload: []const u8) !void {
-    const frame = try allocator.alloc(u8, 4 + payload.len);
-    defer allocator.free(frame);
-    frame[0] = @intCast((payload.len >> 24) & 0xff);
-    frame[1] = @intCast((payload.len >> 16) & 0xff);
-    frame[2] = @intCast((payload.len >> 8) & 0xff);
-    frame[3] = @intCast(payload.len & 0xff);
-    @memcpy(frame[4..], payload);
-    try http1.sendAll(fd, frame);
-}
-
-fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u64, client_fd: http1.Fd) !void {
+fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u64, client: *http1.Connection) !void {
+    const client_fd = client.fd;
     defer {
         var close_payload: [2]u8 = undefined;
         _ = bridge_protocol.encodeTerminal(.tunnel_close, &close_payload) catch unreachable;
@@ -232,7 +193,7 @@ fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u6
         while (server.takeResponse(request_id)) |frame| {
             defer allocator.free(frame);
             switch (try bridge_protocol.frameType(frame)) {
-                .tunnel_chunk => try http1.sendAll(client_fd, try bridge_protocol.decodeChunk(frame, .tunnel_chunk)),
+                .tunnel_chunk => try http1.sendAllConnection(client, try bridge_protocol.decodeChunk(frame, .tunnel_chunk)),
                 .tunnel_close => {
                     output_closed = true;
                     http1.shutdownWrite(client_fd);
@@ -246,7 +207,7 @@ fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u6
             _ = try std.posix.poll(&.{}, 1);
             continue;
         }
-        const count = (try http1.receiveTimeout(client_fd, &buffer, 10)) orelse continue;
+        const count = (try http1.receiveTimeoutConnection(client, &buffer, 10)) orelse continue;
         if (count == 0) {
             input_closed = true;
             var end: [2]u8 = undefined;
@@ -261,7 +222,8 @@ fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u6
     }
 }
 
-fn runTunnel(allocator: std.mem.Allocator, server: anytype, backend_fd: http1.Fd, client_fd: http1.Fd) !void {
+fn runTunnel(allocator: std.mem.Allocator, server: anytype, backend_fd: http1.Fd, client: *http1.Connection) !void {
+    const client_fd = client.fd;
     var backend_input: std.ArrayList(u8) = .empty;
     defer backend_input.deinit(allocator);
     var client_buffer: [8192]u8 = undefined;
@@ -275,31 +237,31 @@ fn runTunnel(allocator: std.mem.Allocator, server: anytype, backend_fd: http1.Fd
         };
         _ = std.posix.poll(&descriptors, 1000) catch return;
         if (descriptors[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-            const count = http1.receive(client_fd, &client_buffer) catch return;
+            const count = http1.receiveConnection(client, &client_buffer) catch return;
             if (count == 0) {
                 var close_payload: [2]u8 = undefined;
                 _ = bridge_protocol.encodeTerminal(.tunnel_close, &close_payload) catch return;
-                sendWireFrame(allocator, backend_fd, &close_payload) catch {};
+                bridge_io.sendFrame(allocator, backend_fd, &close_payload) catch {};
                 input_closed = true;
                 continue;
             }
             const payload = try allocator.alloc(u8, 6 + count);
             defer allocator.free(payload);
             _ = try bridge_protocol.encodeChunk(.tunnel_chunk, client_buffer[0..count], payload);
-            try sendWireFrame(allocator, backend_fd, payload);
+            try bridge_io.sendFrame(allocator, backend_fd, payload);
         }
         if (descriptors[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
             const count = http1.receive(backend_fd, &backend_buffer) catch return;
             if (count == 0) return;
             try backend_input.appendSlice(allocator, backend_buffer[0..count]);
             while (backend_input.items.len >= 4) {
-                const length = readWireU32(backend_input.items[0..4]);
+                const length = bridge_io.frameLength(backend_input.items[0..4]);
                 if (length > bridge_protocol.max_frame_bytes) return error.FrameTooLarge;
                 if (backend_input.items.len < 4 + length) break;
                 const payload = backend_input.items[4 .. 4 + length];
                 const kind = bridge_protocol.frameType(payload) catch return error.UnexpectedTunnelFrame;
                 switch (kind) {
-                    .tunnel_chunk => try http1.sendAll(client_fd, try bridge_protocol.decodeChunk(payload, .tunnel_chunk)),
+                    .tunnel_chunk => try http1.sendAllConnection(client, try bridge_protocol.decodeChunk(payload, .tunnel_chunk)),
                     .tunnel_close => {
                         output_closed = true;
                         http1.shutdownWrite(client_fd);
@@ -313,22 +275,6 @@ fn runTunnel(allocator: std.mem.Allocator, server: anytype, backend_fd: http1.Fd
             }
         }
     }
-}
-
-fn receiveExact(fd: http1.Fd, output: []u8) !void {
-    var offset: usize = 0;
-    while (offset < output.len) {
-        const count = try http1.receive(fd, output[offset..]);
-        if (count == 0) return error.ConnectionClosed;
-        offset += count;
-    }
-}
-
-fn readWireU32(input: []const u8) u32 {
-    return (@as(u32, input[0]) << 24) |
-        (@as(u32, input[1]) << 16) |
-        (@as(u32, input[2]) << 8) |
-        @as(u32, input[3]);
 }
 
 fn hasChunkedEncoding(headers: []const u8) bool {
@@ -382,107 +328,13 @@ fn parseContentLength(headers: []const u8) !usize {
     return 0;
 }
 
-fn decodeResponseFrame(
-    allocator: std.mem.Allocator,
-    frame: []const u8,
-    status: *u16,
-    headers: *std.ArrayList(bridge_protocol.Header),
-    body: *std.ArrayList(u8),
-    done: *bool,
-) !void {
-    if (frame.len < 2 or frame[0] != bridge_protocol.protocol_version) return error.InvalidResponse;
-    switch (frame[1]) {
-        2, 12 => {
-            var offset: usize = 2;
-            status.* = try readU16(frame, &offset);
-            try decodeHeaders(allocator, frame, &offset, headers);
-            const bytes = try readBytes(frame, &offset);
-            try body.appendSlice(allocator, bytes);
-            if (offset != frame.len) return error.InvalidResponse;
-            done.* = true;
-        },
-        6, 14 => {
-            var offset: usize = 2;
-            status.* = try readU16(frame, &offset);
-            try decodeHeaders(allocator, frame, &offset, headers);
-            if (offset != frame.len) return error.InvalidResponse;
-        },
-        7 => {
-            var offset: usize = 2;
-            const bytes = try readBytes(frame, &offset);
-            if (offset != frame.len) return error.InvalidResponse;
-            try body.appendSlice(allocator, bytes);
-        },
-        8 => {
-            if (frame.len != 2) return error.InvalidResponse;
-            done.* = true;
-        },
-        else => return error.InvalidResponse,
-    }
-}
-
-fn decodeHeaders(
-    allocator: std.mem.Allocator,
-    frame: []const u8,
-    offset: *usize,
-    headers: *std.ArrayList(bridge_protocol.Header),
-) !void {
-    const count = try readU32(frame, offset);
-    if (count > 65536) return error.TooManyHeaders;
-    for (0..count) |_| {
-        const name = try readHeaderName(allocator, frame, offset);
-        const value = try allocator.dupe(u8, try readBytes(frame, offset));
-        try headers.append(allocator, .{ .name = name, .value = value });
-    }
-}
-
-fn readHeaderName(allocator: std.mem.Allocator, frame: []const u8, offset: *usize) ![]u8 {
-    const token = try readU16(frame, offset);
-    if (token == 0xffff) return allocator.dupe(u8, try readBytes(frame, offset));
-    const names = [_][]const u8{
-        "host",              "connection",            "user-agent",             "accept",                   "accept-encoding",
-        "accept-language",   "content-type",          "content-length",         "transfer-encoding",        "cookie",
-        "set-cookie",        "cache-control",         "pragma",                 "upgrade",                  "authorization",
-        "origin",            "referer",               "location",               "server",                   "date",
-        "x-forwarded-for",   "x-forwarded-proto",     "x-forwarded-host",       "x-forwarded-port",         "x-request-id",
-        "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions",
-    };
-    if (token >= names.len) return error.InvalidHeaderToken;
-    return allocator.dupe(u8, names[token]);
-}
-
-fn readBytes(frame: []const u8, offset: *usize) ![]const u8 {
-    const length = try readU32(frame, offset);
-    if (length > frame.len -| offset.*) return error.TruncatedResponse;
-    const result = frame[offset.* .. offset.* + length];
-    offset.* += length;
-    return result;
-}
-
-fn readU16(frame: []const u8, offset: *usize) !u16 {
-    if (frame.len -| offset.* < 2) return error.TruncatedResponse;
-    const result = (@as(u16, frame[offset.*]) << 8) | frame[offset.* + 1];
-    offset.* += 2;
-    return result;
-}
-
-fn readU32(frame: []const u8, offset: *usize) !u32 {
-    if (frame.len -| offset.* < 4) return error.TruncatedResponse;
-    const result = (@as(u32, frame[offset.*]) << 24) |
-        (@as(u32, frame[offset.* + 1]) << 16) |
-        (@as(u32, frame[offset.* + 2]) << 8) |
-        frame[offset.* + 3];
-    offset.* += 4;
-    return result;
-}
-
-fn writeUpgradeResponse(allocator: std.mem.Allocator, fd: http1.Fd, status: u16, headers: []const bridge_protocol.Header) !void {
+fn writeUpgradeResponse(allocator: std.mem.Allocator, connection: *http1.Connection, status: u16, headers: []const bridge_protocol.Header) !void {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
     try appendFormat(allocator, &output, "HTTP/1.1 {d} {s}\r\n", .{ status, reason(status) });
     for (headers) |header| try appendFormat(allocator, &output, "{s}: {s}\r\n", .{ header.name, header.value });
     try output.appendSlice(allocator, "\r\n");
-    try http1.sendAll(fd, output.items);
+    try http1.sendAllConnection(connection, output.items);
 }
 
 fn requestIsUpgrade(headers: []const bridge_protocol.Header) bool {
@@ -518,7 +370,7 @@ fn containsToken(value: []const u8, token: []const u8) bool {
 
 fn writeHttpResponse(
     allocator: std.mem.Allocator,
-    fd: http1.Fd,
+    connection: *http1.Connection,
     status: u16,
     headers: []const bridge_protocol.Header,
     body: []const u8,
@@ -540,7 +392,7 @@ fn writeHttpResponse(
     }
     try output.appendSlice(allocator, "\r\n");
     try output.appendSlice(allocator, body);
-    try http1.sendAll(fd, output.items);
+    try http1.sendAllConnection(connection, output.items);
 }
 
 fn appendFormat(
