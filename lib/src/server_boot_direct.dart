@@ -90,7 +90,7 @@ Future<void> _handleChunkedBridgeRequest(
     } catch (error, stack) {
       if (!requestBody.isClosed) {
         requestBody.addError(error, stack);
-        await requestBody.close();
+        unawaited(requestBody.close());
       }
       try {
         await handlerFuture;
@@ -104,7 +104,9 @@ Future<void> _handleChunkedBridgeRequest(
   }
 
   if (!requestBody.isClosed) {
-    await requestBody.close();
+    // A handler may respond without listening to the upload. Waiting for the
+    // controller's done future would hold its response until a listener exists.
+    unawaited(requestBody.close());
   }
 
   try {

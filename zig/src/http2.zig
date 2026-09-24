@@ -43,7 +43,11 @@ pub const Session = struct {
     control_used: usize = 0,
     inspect_control: bool = false,
     header_block_stream: i32 = 0,
-    const Body = struct { bytes: []u8, offset: usize = 0 };
+    pub const Producer = struct {
+        context: *anyopaque,
+        read: *const fn (*anyopaque, []u8, *bool) usize,
+    };
+    const Body = struct { bytes: []u8, offset: usize = 0, producer: ?Producer = null, deferred: bool = false };
 
     /// Allocated at a stable address because nghttp2 retains our callback context.
     pub fn create(allocator: std.mem.Allocator, sink: Sink, limits: Limits) Error!*Session {
@@ -186,7 +190,6 @@ pub const Session = struct {
     }
 
     /// Copies a finite response body. Memory is bounded across all active streams.
-    /// Streaming response producers will be added when the transport is attached.
     pub fn respond(self: *Session, stream: i32, status: u16, headers: []const Header, bytes: []const u8) Error!void {
         try self.alive();
         if (stream <= 0 or status < 200 or status > 599 or headers.len > 128) return error.InvalidArgument;
@@ -212,6 +215,20 @@ pub const Session = struct {
         var provider = c.nghttp2_data_provider2{ .source = .{ .ptr = body }, .read_callback = readBody };
         try self.check(c.nghttp2_submit_response2(self.native, stream, fields.ptr, fields.len, &provider));
         self.queued_bytes += bytes.len;
+    }
+
+    /// Producer is borrowed until stream close; only called by output().
+    pub fn respondStreaming(self: *Session, stream: i32, status: u16, headers: []const Header, producer: Producer) Error!void {
+        try self.respond(stream, status, headers, "");
+        self.bodies.get(stream).?.producer = producer;
+    }
+
+    pub fn resumeResponse(self: *Session, stream: i32) Error!void {
+        try self.alive();
+        const body = self.bodies.get(stream) orelse return;
+        if (!body.deferred) return;
+        try self.check(c.nghttp2_session_resume_data(self.native, stream));
+        body.deferred = false;
     }
 
     pub fn reset(self: *Session, stream: i32, code: u32) Error!void {
@@ -306,6 +323,16 @@ pub const Session = struct {
     }
     fn readBody(_: ?*c.nghttp2_session, _: i32, buffer: [*c]u8, len: usize, flags: [*c]u32, source: [*c]c.nghttp2_data_source, _: ?*anyopaque) callconv(.c) c.nghttp2_ssize {
         const body: *Body = @ptrCast(@alignCast(source.*.ptr.?));
+        if (body.producer) |producer| {
+            var done = false;
+            const count = producer.read(producer.context, buffer[0..len], &done);
+            if (done) flags.* |= c.NGHTTP2_DATA_FLAG_EOF;
+            if (count == 0 and !done) {
+                body.deferred = true;
+                return c.NGHTTP2_ERR_DEFERRED;
+            }
+            return @intCast(count);
+        }
         const count = @min(len, body.bytes.len - body.offset);
         @memcpy(buffer[0..count], body.bytes[body.offset..][0..count]);
         body.offset += count;

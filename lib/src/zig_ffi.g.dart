@@ -15,7 +15,25 @@ external int server_native_zig_transport_version();
 >(symbol: 'server_native_zig_start_proxy_server')
 external ffi.Pointer<ffi.Void> server_native_zig_start_proxy_server(
   ffi.Pointer<ffi.Void> config,
-  ffi.Pointer<ffi.Uint16> outPort,
+  ffi.Pointer<ffi.Uint16> out_port,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_begin_shutdown',
+)
+external void server_native_zig_begin_shutdown(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<ffi.Bool Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_shutdown_done',
+)
+external bool server_native_zig_shutdown_done(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>, ffi.Int64)>(
+  symbol: 'server_native_zig_set_event_port',
+)
+external void server_native_zig_set_event_port(
+  ffi.Pointer<ffi.Void> handle,
+  int port,
 );
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
@@ -33,9 +51,24 @@ external void server_native_zig_stop_proxy_server(ffi.Pointer<ffi.Void> handle);
 >(symbol: 'server_native_zig_push_direct_response_frame')
 external int server_native_zig_push_direct_response_frame(
   ffi.Pointer<ffi.Void> handle,
-  int requestId,
-  ffi.Pointer<ffi.Uint8> responsePayload,
-  int responsePayloadLen,
+  int request_id,
+  ffi.Pointer<ffi.Uint8> response_payload,
+  int response_payload_len,
+);
+
+@ffi.Native<
+  ffi.Uint8 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+  )
+>(symbol: 'server_native_zig_complete_direct_request')
+external int server_native_zig_complete_direct_request(
+  ffi.Pointer<ffi.Void> handle,
+  int request_id,
+  ffi.Pointer<ffi.Uint8> response_payload,
+  int response_payload_len,
 );
 
 @ffi.Native<
@@ -49,10 +82,10 @@ external int server_native_zig_push_direct_response_frame(
 >(symbol: 'server_native_zig_poll_direct_request_frame')
 external int server_native_zig_poll_direct_request_frame(
   ffi.Pointer<ffi.Void> handle,
-  int timeoutMillis,
-  ffi.Pointer<ffi.Uint64> outRequestId,
-  ffi.Pointer<ffi.Pointer<ffi.Uint8>> outPayload,
-  ffi.Pointer<ffi.Uint64> outPayloadLen,
+  int timeout_millis,
+  ffi.Pointer<ffi.Uint64> out_request_id,
+  ffi.Pointer<ffi.Pointer<ffi.Uint8>> out_payload,
+  ffi.Pointer<ffi.Uint64> out_payload_len,
 );
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Uint8>, ffi.Uint64)>(
@@ -60,22 +93,7 @@ external int server_native_zig_poll_direct_request_frame(
 )
 external void server_native_zig_free_direct_request_payload(
   ffi.Pointer<ffi.Uint8> payload,
-  int payloadLen,
-);
-
-@ffi.Native<
-  ffi.Uint8 Function(
-    ffi.Pointer<ffi.Void>,
-    ffi.Uint64,
-    ffi.Pointer<ffi.Uint8>,
-    ffi.Uint64,
-  )
->(symbol: 'server_native_zig_complete_direct_request')
-external int server_native_zig_complete_direct_request(
-  ffi.Pointer<ffi.Void> handle,
-  int requestId,
-  ffi.Pointer<ffi.Uint8> responsePayload,
-  int responsePayloadLen,
+  int payload_len,
 );
 
 @ffi.Native<ffi.IntPtr Function(ffi.Pointer<ffi.Void>)>(
@@ -142,6 +160,3 @@ external bool server_native_zig_queue_post_next(
   ffi.Pointer<ffi.Void> handle,
   int port_id,
 );
-
-@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>, ffi.Int64)>(symbol: 'server_native_zig_set_event_port')
-external void server_native_zig_set_event_port(ffi.Pointer<ffi.Void> handle, int port);

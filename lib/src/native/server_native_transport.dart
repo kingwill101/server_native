@@ -303,9 +303,37 @@ final class NativeProxyServer {
     }
   }
 
+  Future<void>? _closeFuture;
+
+  /// Drains QUIC while Dart remains responsive, then releases native ownership.
+  Future<void> closeAsync({bool force = false}) =>
+      _closeFuture ??= _closeAsync(force: force);
+
+  Future<void> _closeAsync({required bool force}) async {
+    if (_closed) return;
+    if (!_zigBackend) {
+      close();
+      return;
+    }
+    if (!force) {
+      zig_ffi.server_native_zig_begin_shutdown(_handle);
+      while (!zig_ffi.server_native_zig_shutdown_done(_handle)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    }
+    _closed = true;
+    zig_ffi.server_native_zig_set_event_port(_handle, 0);
+    _eventPort?.close();
+    if (!_requestReady.isCompleted) _requestReady.complete();
+    final address = _handle.address;
+    // The worker receives only the address. Dart stops accessing the handle
+    // before native stop joins threads and frees it.
+    await Isolate.run(() => _stopZigProxy(address));
+  }
+
   /// Stops the native proxy server.
   void close() {
-    if (_closed) return;
+    if (_closed || (_zigBackend && _closeFuture != null)) return;
     _closed = true;
     if (_zigBackend) {
       zig_ffi.server_native_zig_set_event_port(_handle, 0);
@@ -432,4 +460,8 @@ final class NativeProxyServer {
       calloc.free(payloadLenPtr);
     }
   }
+}
+
+void _stopZigProxy(int address) {
+  zig_ffi.server_native_zig_stop_proxy_server(ffi.Pointer.fromAddress(address));
 }

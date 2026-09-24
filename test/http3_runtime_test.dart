@@ -10,6 +10,7 @@ void main() {
     for (final mode in [
       'curl',
       'aioquic',
+      'streaming',
       'loss',
       'close-loss',
       'drain-replay',
@@ -29,6 +30,15 @@ void main() {
           final entered = Completer<void>();
           final release = Completer<void>();
           server.listen((request) async {
+            if (request.uri.path == '/stream') {
+              request.response.bufferOutput = false;
+              await for (final chunk in request) {
+                request.response.add(chunk);
+                await request.response.flush();
+              }
+              await request.response.close();
+              return;
+            }
             if (request.uri.path == '/advertise') {
               await request.response.close();
               return;

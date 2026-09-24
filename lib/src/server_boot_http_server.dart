@@ -348,7 +348,7 @@ final class NativeHttpServer extends StreamView<HttpRequest>
       await _waitForActiveRequestsToDrain();
     }
     await Future.wait(
-      _bindings.map((binding) => binding.running.close(force: true)),
+      _bindings.map((binding) => binding.running.close(force: force)),
       eagerError: false,
     );
     await Future.wait(

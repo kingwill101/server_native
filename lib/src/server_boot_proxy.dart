@@ -212,7 +212,7 @@ Future<_RunningProxy> _startNativeProxy({
   var stopping = false;
 
   /// Attempts graceful shutdown across proxy and bridge resources.
-  Future<void> stopAll() async {
+  Future<void> stopAll({bool force = false}) async {
     if (done.isCompleted || stopping) return;
     stopping = true;
     forceExitTimer?.cancel();
@@ -223,7 +223,7 @@ Future<_RunningProxy> _startNativeProxy({
     }
     signalSubscriptions.clear();
     try {
-      proxy.close();
+      await proxy.closeAsync(force: force);
     } catch (error, stack) {
       stderr.writeln('[server_native] proxy shutdown error: $error\n$stack');
     }
@@ -297,12 +297,7 @@ Future<_RunningProxy> _startNativeProxy({
   return _RunningProxy(
     host: host,
     port: proxy.port,
-    close: ({bool force = false}) {
-      if (force) {
-        proxy.close();
-      }
-      return stopAll();
-    },
+    close: ({bool force = false}) => stopAll(force: force),
     done: done.future,
     connectionsInfo: () =>
         connectionCounters?.snapshot() ?? HttpConnectionsInfo(),

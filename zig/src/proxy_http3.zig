@@ -79,6 +79,10 @@ pub fn Runtime(comptime Server: type) type {
         server: *Server,
         thread: ?std.Thread = null,
         peers: std.ArrayList(*Peer) = .empty,
+        shutdown_requested: std.atomic.Value(bool) = .init(false),
+        shutdown_complete: std.atomic.Value(bool) = .init(false),
+        shutdown_started: bool = false,
+        shutdown_deadline: u64 = 0,
 
         pub fn create(server: *Server, cert: [:0]const u8, key: [:0]const u8) !*Self {
             var local: c.sockaddr_storage = undefined;
@@ -98,6 +102,12 @@ pub fn Runtime(comptime Server: type) type {
         pub fn start(self: *Self) !void {
             self.thread = try std.Thread.spawn(.{}, run, .{self});
         }
+        pub fn beginShutdown(self: *Self) void {
+            self.shutdown_requested.store(true, .release);
+        }
+        pub fn shutdownDone(self: *Self) bool {
+            return self.shutdown_complete.load(.acquire);
+        }
         pub fn deinit(self: *Self) void {
             if (self.thread) |thread| thread.join();
             for (self.peers.items) |peer| peer.deinit();
@@ -107,7 +117,17 @@ pub fn Runtime(comptime Server: type) type {
             allocator.destroy(self);
         }
         fn run(self: *Self) void {
-            while (!self.server.stopped.load(.acquire)) {
+            defer self.shutdown_complete.store(true, .release);
+            while (true) {
+                if (self.server.stopped.load(.acquire)) break;
+                if (self.shutdown_requested.load(.acquire) and !self.shutdown_started) {
+                    self.shutdown_started = true;
+                    self.shutdown_deadline = now() +| 2_000_000_000;
+                    for (self.peers.items) |peer| peer.beginGracefulShutdown();
+                }
+                // Closing the UDP socket permits releasing retained routing
+                // state even when Dart has stopped draining its bounded queue.
+                if (self.shutdown_started and (self.peers.items.len == 0 or now() >= self.shutdown_deadline)) break;
                 var poll = [_]std.posix.pollfd{.{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 }};
                 _ = std.posix.poll(&poll, 5) catch break;
                 // Bound ingress so timers and handler replies cannot starve.
@@ -123,7 +143,8 @@ pub fn Runtime(comptime Server: type) type {
                 while (i < self.peers.items.len) {
                     const peer = self.peers.items[i];
                     if (peer.termination.phase == .active) {
-                        peer.tick() catch {
+                        if (self.shutdown_started and now() >= self.shutdown_deadline) peer.beginTermination();
+                        if (peer.termination.phase == .active) peer.tick() catch {
                             peer.failed = true;
                         };
                         if (peer.failed) peer.beginTermination();
@@ -138,8 +159,8 @@ pub fn Runtime(comptime Server: type) type {
                     } else i += 1;
                 }
             }
-            // Forced listener shutdown closes the UDP socket, so it need not
-            // retain routing tombstones after the thread exits.
+            // Any peers still present after the grace window are force-closed
+            // before the owner releases their native state.
             for (self.peers.items) |peer| peer.beginTermination();
         }
         fn receive(self: *Self, packet: []const u8, remote: *c.sockaddr_storage, remote_len: c.socklen_t) !void {
@@ -152,6 +173,7 @@ pub fn Runtime(comptime Server: type) type {
                 }
             }
             if (found == null) {
+                if (self.server.stopped.load(.acquire) or self.shutdown_started) return;
                 if (self.peers.items.len >= max_connections) return;
                 var header: c.ngtcp2_pkt_hd = undefined;
                 if (c.ngtcp2_accept(&header, packet.ptr, packet.len) != 0) return;
@@ -188,6 +210,8 @@ pub fn Runtime(comptime Server: type) type {
         const Stream = struct {
             request: *shared.Request,
             submitted: bool = false,
+            blocked: bool = false,
+            body: @import("stream_body.zig").Body = .{},
             closed: bool = false,
         };
         const Peer = struct {
@@ -204,6 +228,9 @@ pub fn Runtime(comptime Server: type) type {
             silent: bool = false,
             last_error: c_int = 0,
             termination: Termination = .{},
+            graceful: bool = false,
+            goaway_deadline: u64 = 0,
+            goaway_sent: bool = false,
             close_packet: [1350]u8 = undefined,
             close_len: usize = 0,
             close_remote: c.sockaddr_storage = std.mem.zeroes(c.sockaddr_storage),
@@ -275,6 +302,7 @@ pub fn Runtime(comptime Server: type) type {
                 var it = self.streams.valueIterator();
                 while (it.next()) |stream| {
                     if (stream.request.request_id) |id| self.owner.server.discardRequest(id);
+                    stream.body.deinit(allocator);
                     stream.request.deinit();
                 }
                 self.streams.deinit();
@@ -288,6 +316,16 @@ pub fn Runtime(comptime Server: type) type {
                     ready = ready and finished;
                 }
                 return ready;
+            }
+            fn beginGracefulShutdown(self: *Peer) void {
+                if (self.termination.phase != .active or self.graceful) return;
+                self.graceful = true;
+                var info: c.ngtcp2_conn_info = undefined;
+                c.ngtcp2_conn_get_conn_info(self.quic, &info);
+                self.goaway_deadline = now() +| @max(100_000_000, 2 *| info.smoothed_rtt);
+                if (self.codec) |codec| {
+                    if (c.nghttp3_conn_submit_shutdown_notice(codec.native) != 0) self.failed = true;
+                }
             }
             fn beginTermination(self: *Peer) void {
                 if (self.termination.phase != .active) return;
@@ -336,6 +374,10 @@ pub fn Runtime(comptime Server: type) type {
                     }
                 }
                 if (self.codec) |*codec| {
+                    if (self.graceful and !self.goaway_sent and time >= self.goaway_deadline) {
+                        if (c.nghttp3_conn_shutdown(codec.native) != 0) return error.Http3Failed;
+                        self.goaway_sent = true;
+                    }
                     var it = self.streams.iterator();
                     var retired: std.ArrayList(i64) = .empty;
                     defer retired.deinit(allocator);
@@ -347,26 +389,49 @@ pub fn Runtime(comptime Server: type) type {
                             continue;
                         }
                         const request = stream.request;
-                        if (!request.ended or stream.submitted) continue;
+                        if (!request.headers_ready) continue;
+                        request.response_paused = stream.body.bytes >= 256 * 1024;
                         try shared.progressRequest(allocator, self.owner.server, request);
-                        if (!request.response_done or (request.request_id != null and request.direct_stage != .waiting)) continue;
-                        var status: [3]u8 = undefined;
-                        const status_text = try std.fmt.bufPrint(&status, "{d}", .{request.response.status});
-                        var fields: std.ArrayList(c.nghttp3_nv) = .empty;
-                        defer fields.deinit(allocator);
-                        try fields.append(allocator, nv(":status", status_text));
-                        for (request.response.headers.items) |header| {
-                            if (std.ascii.eqlIgnoreCase(header.name, "connection") or std.ascii.eqlIgnoreCase(header.name, "transfer-encoding") or std.ascii.eqlIgnoreCase(header.name, "keep-alive") or std.ascii.eqlIgnoreCase(header.name, "upgrade")) continue;
-                            try fields.append(allocator, nv(header.name, header.value));
+                        if (request.consumed_body != 0) {
+                            self.credit(entry.key_ptr.*, request.consumed_body);
+                            request.consumed_body = 0;
                         }
-                        var reader: c.nghttp3_data_reader = .{ .read_data = readBody };
-                        if (c.nghttp3_conn_submit_response(codec.native, entry.key_ptr.*, fields.items.ptr, fields.items.len, &reader) != 0) return error.Http3Failed;
-                        stream.submitted = true;
+                        if (request.response.body.items.len != 0) {
+                            const chunk = try request.response.body.toOwnedSlice(allocator);
+                            errdefer allocator.free(chunk);
+                            try stream.body.append(allocator, chunk);
+                        }
+                        if (stream.submitted) {
+                            if (stream.blocked and (stream.body.bytes != 0 or request.response_done)) {
+                                if (c.nghttp3_conn_resume_stream(codec.native, entry.key_ptr.*) != 0) return error.Http3Failed;
+                                stream.blocked = false;
+                            }
+                        } else {
+                            if (!request.response.ready) continue;
+                            var status: [3]u8 = undefined;
+                            const status_text = try std.fmt.bufPrint(&status, "{d}", .{request.response.status});
+                            var fields: std.ArrayList(c.nghttp3_nv) = .empty;
+                            defer fields.deinit(allocator);
+                            try fields.append(allocator, nv(":status", status_text));
+                            for (request.response.headers.items) |header| {
+                                if (std.ascii.eqlIgnoreCase(header.name, "connection") or std.ascii.eqlIgnoreCase(header.name, "transfer-encoding") or std.ascii.eqlIgnoreCase(header.name, "keep-alive") or std.ascii.eqlIgnoreCase(header.name, "upgrade")) continue;
+                                try fields.append(allocator, nv(header.name, header.value));
+                            }
+                            var reader: c.nghttp3_data_reader = .{ .read_data = readBody };
+                            if (c.nghttp3_conn_submit_response(codec.native, entry.key_ptr.*, fields.items.ptr, fields.items.len, &reader) != 0) return error.Http3Failed;
+                            stream.submitted = true;
+                        }
                     }
                     for (retired.items) |id| {
-                        const stream = self.streams.fetchRemove(id).?.value;
+                        var stream = self.streams.fetchRemove(id).?.value;
                         if (stream.request.request_id) |request_id| self.owner.server.discardRequest(request_id);
+                        stream.body.deinit(allocator);
                         stream.request.deinit();
+                    }
+                    // Flush the final GOAWAY before terminating on the next tick.
+                    if (self.goaway_sent and c.nghttp3_conn_is_drained(codec.native) != 0 and time >= self.goaway_deadline +| 100_000_000) {
+                        self.beginTermination();
+                        return;
                     }
                 }
                 // Limit output per connection to preserve fairness.
@@ -428,6 +493,8 @@ pub fn Runtime(comptime Server: type) type {
                 var callbacks = std.mem.zeroes(c.nghttp3_callbacks);
                 callbacks.begin_headers = beginHeaders;
                 callbacks.recv_header = recvHeader;
+                callbacks.acked_stream_data = acknowledgedBody;
+                callbacks.end_headers = endHeaders;
                 callbacks.recv_data = data;
                 callbacks.deferred_consume = consumed;
                 callbacks.end_stream = endStream;
@@ -517,12 +584,22 @@ pub fn Runtime(comptime Server: type) type {
                     try request.headers.append(allocator, .{ .name = owned_name, .value = owned });
                 }
             }
+            fn endHeaders(_: ?*c.nghttp3_conn, stream: i64, _: c_int, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+                const self = selfFrom(Peer, context);
+                if (self.streams.getPtr(stream)) |state| state.request.headers_ready = true;
+                return 0;
+            }
+            fn acknowledgedBody(_: ?*c.nghttp3_conn, stream: i64, count: u64, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+                const self = selfFrom(Peer, context);
+                const state = self.streams.getPtr(stream) orelse return c.NGHTTP3_ERR_CALLBACK_FAILURE;
+                state.body.acknowledge(allocator, @intCast(count)) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
+                return 0;
+            }
             fn data(_: ?*c.nghttp3_conn, stream: i64, bytes: [*c]const u8, len: usize, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
                 const self = selfFrom(Peer, context);
                 const state = self.streams.getPtr(stream) orelse return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 if (len > 32 * 1024 * 1024 -| state.request.body.items.len) return c.NGHTTP3_ERR_CALLBACK_FAILURE;
                 state.request.body.appendSlice(allocator, bytes[0..len]) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
-                self.credit(stream, len);
                 return 0;
             }
             fn consumed(_: ?*c.nghttp3_conn, stream: i64, len: usize, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
@@ -551,11 +628,16 @@ pub fn Runtime(comptime Server: type) type {
             fn readBody(_: ?*c.nghttp3_conn, stream: i64, vectors: [*c]c.nghttp3_vec, _: usize, flags: [*c]u32, context: ?*anyopaque, _: ?*anyopaque) callconv(.c) c.nghttp3_ssize {
                 const self = selfFrom(Peer, context);
                 const state = self.streams.getPtr(stream) orelse return c.NGHTTP3_ERR_CALLBACK_FAILURE;
-                const body = state.request.response.body.items;
-                flags.* |= c.NGHTTP3_DATA_FLAG_EOF;
-                if (body.len == 0) return 0;
-                vectors[0] = .{ .base = body.ptr, .len = body.len };
-                return 1;
+                if (state.body.next()) |body| {
+                    vectors[0] = .{ .base = body.ptr, .len = body.len };
+                    return 1;
+                }
+                if (state.request.response_done) {
+                    flags.* |= c.NGHTTP3_DATA_FLAG_EOF;
+                    return 0;
+                }
+                state.blocked = true;
+                return c.NGHTTP3_ERR_WOULDBLOCK;
             }
         };
     };

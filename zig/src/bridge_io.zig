@@ -3,15 +3,15 @@ const bridge_protocol = @import("bridge_protocol.zig");
 const http1 = @import("http1.zig").posix;
 
 const known_header_names = [_][]const u8{
-    "host", "connection", "user-agent", "accept", "accept-encoding", "accept-language",
-    "content-type", "content-length", "transfer-encoding", "cookie", "set-cookie",
-    "cache-control", "pragma", "upgrade", "authorization", "origin", "referer", "location",
-    "server", "date", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
-    "x-forwarded-port", "x-request-id", "sec-websocket-key", "sec-websocket-version",
-    "sec-websocket-protocol", "sec-websocket-extensions",
+    "host",         "connection",        "user-agent",            "accept",                 "accept-encoding",          "accept-language",
+    "content-type", "content-length",    "transfer-encoding",     "cookie",                 "set-cookie",               "cache-control",
+    "pragma",       "upgrade",           "authorization",         "origin",                 "referer",                  "location",
+    "server",       "date",              "x-forwarded-for",       "x-forwarded-proto",      "x-forwarded-host",         "x-forwarded-port",
+    "x-request-id", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions",
 };
 
 pub const Response = struct {
+    ready: bool = false,
     status: u16 = 500,
     headers: std.ArrayList(bridge_protocol.Header) = .empty,
     body: std.ArrayList(u8) = .empty,
@@ -64,6 +64,7 @@ pub fn decodeResponseFrame(
     switch (frame[1]) {
         2, 12 => {
             var offset: usize = 2;
+            response.ready = true;
             response.status = try readU16(frame, &offset);
             try decodeHeaders(allocator, frame, &offset, &response.headers);
             try response.body.appendSlice(allocator, try readBytes(frame, &offset));
@@ -72,6 +73,7 @@ pub fn decodeResponseFrame(
         },
         6, 14 => {
             var offset: usize = 2;
+            response.ready = true;
             response.status = try readU16(frame, &offset);
             try decodeHeaders(allocator, frame, &offset, &response.headers);
             if (offset != frame.len) return error.InvalidResponse;
