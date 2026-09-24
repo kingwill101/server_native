@@ -71,7 +71,9 @@ Initial scan found:
   - [x] Bound native HTTP/3 connection/listener allocations and direct response queues; verify paused upload/download backpressure with independent aioquic clients in bridge/direct modes.
   - [x] Advertised migration-disabled policy, NAT port rebinding/path challenge, forged-path rejection, and unvalidated-address amplification gates; explicit no-Retry policy.
   - [x] IPv6-only/dual-stack UDP binding and release, with TCP `v6Only` behavior checked against dart:io.
-  - [ ] Shared UDP connection routing and sustained resource stress (including TLS/Dart allocations outside native budgets).
+  - [x] Shared UDP connection-ID routing across listeners/isolates, independent shutdown, rebinding, and retained close state.
+  - [x] Repeated listener startup, concurrent uploads, stream cancellation, shutdown, UDP rebind, and Linux descriptor accounting.
+  - [ ] Sustained-load resource validation including TLS/Dart allocations outside native budgets, and investigation of immediate UDP rebind failures observed during parallel tests plus native compilation.
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
 - [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
 

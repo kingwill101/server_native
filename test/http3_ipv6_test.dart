@@ -43,7 +43,9 @@ void main() {
               server.port,
               reuseAddress: false,
             );
+            final ipv4Closed = ipv4.drain<void>();
             ipv4.close();
+            await ipv4Closed;
           }
         } finally {
           await server.close(force: true);
@@ -53,7 +55,9 @@ void main() {
           server.port,
           reuseAddress: false,
         );
+        final closed = rebound.drain<void>();
         rebound.close();
+        await closed;
       });
     }
   }

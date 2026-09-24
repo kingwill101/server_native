@@ -152,7 +152,7 @@ pub const ProxyServer = struct {
             .http2_enabled = config.http2 != 0,
         };
         if (config.http3 != 0 and tls != null) {
-            server.http3 = proxy_http3.Runtime(ProxyServer).create(server, std.mem.span(config.tls_cert_path), std.mem.span(config.tls_key_path)) catch {
+            server.http3 = proxy_http3.Runtime(ProxyServer).create(server, std.mem.span(config.tls_cert_path), std.mem.span(config.tls_key_path), config.shared != 0) catch {
                 server.stop();
                 return null;
             };

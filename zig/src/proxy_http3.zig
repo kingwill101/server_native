@@ -8,6 +8,19 @@ const backing_allocator = std.heap.c_allocator;
 const Budget = @import("memory_budget.zig").Budget;
 const max_connections = 128;
 
+const Mutex = struct {
+    native: std.c.pthread_mutex_t = .{},
+    fn lock(self: *Mutex) void {
+        std.debug.assert(std.c.pthread_mutex_lock(&self.native) == .SUCCESS);
+    }
+    fn unlock(self: *Mutex) void {
+        std.debug.assert(std.c.pthread_mutex_unlock(&self.native) == .SUCCESS);
+    }
+    fn deinit(self: *Mutex) void {
+        std.debug.assert(std.c.pthread_mutex_destroy(&self.native) == .SUCCESS);
+    }
+};
+
 fn now() u64 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) unreachable;
@@ -78,7 +91,8 @@ pub fn Runtime(comptime Server: type) type {
         local_len: c.socklen_t,
         tls: h3.TlsContext,
         server: *Server,
-        thread: ?std.Thread = null,
+        group: *Group,
+        started: bool = false,
         peers: std.ArrayList(*Peer) = .empty,
         memory: Budget = .{ .parent = backing_allocator, .limit = 128 * 1024 * 1024 },
         shutdown_requested: std.atomic.Value(bool) = .init(false),
@@ -86,32 +100,68 @@ pub fn Runtime(comptime Server: type) type {
         shutdown_started: bool = false,
         shutdown_deadline: u64 = 0,
 
-        pub fn create(server: *Server, cert: [:0]const u8, key: [:0]const u8) !*Self {
+        pub fn create(server: *Server, cert: [:0]const u8, key: [:0]const u8, shared_listener: bool) !*Self {
             var local: c.sockaddr_storage = undefined;
             var len: c.socklen_t = @sizeOf(c.sockaddr_storage);
             if (c.getsockname(server.listener.fd, @ptrCast(&local), &len) != 0) return error.SocketFailed;
-            const fd = c.socket(local.ss_family, c.SOCK_DGRAM | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0);
-            if (fd < 0) return error.SocketFailed;
-            errdefer _ = c.close(fd);
-            // UDP must honor the same IPv6-only contract as the TCP listener.
-            // OS defaults can differ from the explicitly configured TCP option.
+            var v6_only: c_int = 0;
             if (local.ss_family == c.AF_INET6) {
-                var v6_only: c_int = 0;
                 var option_len: c.socklen_t = @sizeOf(c_int);
-                if (c.getsockopt(server.listener.fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, &option_len) != 0 or
-                    c.setsockopt(fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, @sizeOf(c_int)) != 0)
-                    return error.SocketFailed;
+                if (c.getsockopt(server.listener.fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, &option_len) != 0) return error.SocketFailed;
             }
-            if (c.bind(fd, @ptrCast(&local), len) != 0) return error.BindFailed;
             var tls = try h3.TlsContext.initServer();
             errdefer tls.deinit();
             try tls.certificate(cert, key);
             const self = try backing_allocator.create(Self);
-            self.* = .{ .fd = fd, .local = local, .local_len = len, .tls = tls, .server = server };
+            errdefer backing_allocator.destroy(self);
+            // Registry -> group is the only lock order. The UDP worker only
+            // takes its group lock, never the registry lock.
+            registry_mutex.lock();
+            defer registry_mutex.unlock();
+            var group: ?*Group = null;
+            for (groups.items) |candidate| {
+                if (sameAddress(&candidate.local, &local) and candidate.v6_only == v6_only) {
+                    if (!shared_listener or !candidate.shared_listener) return error.BindFailed;
+                    group = candidate;
+                    break;
+                }
+            }
+            const created = group == null;
+            if (created) {
+                group = try Group.create(local, len, v6_only, shared_listener);
+                groups.append(backing_allocator, group.?) catch |err| {
+                    group.?.destroy();
+                    return err;
+                };
+            }
+            const owner = group.?;
+            owner.mutex.lock();
+            if (owner.members.items.len >= 128) {
+                owner.mutex.unlock();
+                return error.TooManyListeners;
+            }
+            self.* = .{ .fd = owner.fd, .local = local, .local_len = len, .tls = tls, .server = server, .group = owner };
+            self.memory.parent = owner.memory.allocator();
+            owner.members.append(backing_allocator, self) catch |err| {
+                owner.mutex.unlock();
+                if (created) {
+                    _ = groups.pop();
+                    if (groups.items.len == 0) {
+                        groups.deinit(backing_allocator);
+                        groups = .empty;
+                    }
+                    owner.destroy();
+                }
+                return err;
+            };
+            owner.mutex.unlock();
             return self;
         }
         pub fn start(self: *Self) !void {
-            self.thread = try std.Thread.spawn(.{}, run, .{self});
+            self.group.mutex.lock();
+            defer self.group.mutex.unlock();
+            if (self.group.thread == null) self.group.thread = try std.Thread.spawn(.{}, Group.run, .{self.group});
+            self.started = true;
         }
         pub fn beginShutdown(self: *Self) void {
             self.shutdown_requested.store(true, .release);
@@ -120,61 +170,200 @@ pub fn Runtime(comptime Server: type) type {
             return self.shutdown_complete.load(.acquire);
         }
         pub fn deinit(self: *Self) void {
-            if (self.thread) |thread| thread.join();
-            for (self.peers.items) |peer| peer.deinit();
+            registry_mutex.lock();
+            defer registry_mutex.unlock();
+            const group = self.group;
+            group.mutex.lock();
+            for (self.peers.items) |peer| {
+                peer.beginTermination();
+                // Another listener keeps UDP open. Preserve connection IDs and
+                // close packets independently of the departing Dart/native owner.
+                if (group.members.items.len > 1) group.retain(peer);
+                peer.deinit();
+            }
             self.peers.deinit(self.memory.allocator());
             self.tls.deinit();
-            _ = c.close(self.fd);
             std.debug.assert(self.memory.used == 0);
+            for (group.members.items, 0..) |member, i| {
+                if (member == self) {
+                    _ = group.members.orderedRemove(i);
+                    break;
+                }
+            }
+            const last = group.members.items.len == 0;
+            if (last) group.stopped.store(true, .release);
+            group.mutex.unlock();
+            if (last) {
+                for (groups.items, 0..) |candidate, i| {
+                    if (candidate == group) {
+                        _ = groups.swapRemove(i);
+                        break;
+                    }
+                }
+                if (groups.items.len == 0) {
+                    groups.deinit(backing_allocator);
+                    groups = .empty;
+                }
+                group.destroy();
+            }
             backing_allocator.destroy(self);
         }
-        fn run(self: *Self) void {
-            defer self.shutdown_complete.store(true, .release);
-            while (true) {
-                if (self.server.stopped.load(.acquire)) break;
-                if (self.shutdown_requested.load(.acquire) and !self.shutdown_started) {
-                    self.shutdown_started = true;
-                    self.shutdown_deadline = now() +| 2_000_000_000;
-                    for (self.peers.items) |peer| peer.beginGracefulShutdown();
+        fn tick(self: *Self) void {
+            if (self.shutdown_complete.load(.acquire)) return;
+            if (self.shutdown_requested.load(.acquire) and !self.shutdown_started) {
+                self.shutdown_started = true;
+                self.shutdown_deadline = now() +| 2_000_000_000;
+                for (self.peers.items) |peer| peer.beginGracefulShutdown();
+            }
+            if (self.server.stopped.load(.acquire) or
+                (self.shutdown_started and (self.peers.items.len == 0 or now() >= self.shutdown_deadline)))
+            {
+                for (self.peers.items) |peer| peer.beginTermination();
+                self.shutdown_complete.store(true, .release);
+                return;
+            }
+            var i: usize = 0;
+            while (i < self.peers.items.len) {
+                const peer = self.peers.items[i];
+                if (peer.termination.phase == .active) {
+                    peer.tick() catch {
+                        peer.failed = true;
+                    };
+                    if (peer.failed) peer.beginTermination();
+                } else {
+                    _ = peer.finishCancelledBodies();
                 }
-                // Closing the UDP socket permits releasing retained routing
-                // state even when Dart has stopped draining its bounded queue.
-                if (self.shutdown_started and (self.peers.items.len == 0 or now() >= self.shutdown_deadline)) break;
-                var poll = [_]std.posix.pollfd{.{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 }};
-                _ = std.posix.poll(&poll, 5) catch break;
-                // Bound ingress so timers and handler replies cannot starve.
-                for (0..32) |_| {
-                    var packet: [65536]u8 = undefined;
-                    var remote: c.sockaddr_storage = undefined;
-                    var remote_len: c.socklen_t = @sizeOf(c.sockaddr_storage);
-                    const size = c.recvfrom(self.fd, &packet, packet.len, c.MSG_DONTWAIT, @ptrCast(&remote), &remote_len);
-                    if (size < 0) break;
-                    self.receive(packet[0..@intCast(size)], &remote, remote_len) catch {};
+                if (peer.termination.expired(now()) and peer.finishCancelledBodies()) {
+                    _ = self.peers.swapRemove(i);
+                    peer.deinit();
+                } else i += 1;
+            }
+        }
+
+        var registry_mutex: Mutex = .{};
+        var groups: std.ArrayList(*Group) = .empty;
+
+        const Tombstone = struct {
+            ids: [17]c.ngtcp2_cid,
+            count: usize,
+            termination: Termination,
+            packet: [1350]u8,
+            length: usize,
+            remote: c.sockaddr_storage,
+            remote_len: c.socklen_t,
+            fn matches(self: *const Tombstone, id: []const u8) bool {
+                for (self.ids[0..self.count]) |cid| {
+                    if (std.mem.eql(u8, cid.data[0..cid.datalen], id)) return true;
                 }
+                return false;
+            }
+        };
+        const Group = struct {
+            fd: c_int,
+            local: c.sockaddr_storage,
+            v6_only: c_int,
+            shared_listener: bool,
+            mutex: Mutex = .{},
+            thread: ?std.Thread = null,
+            stopped: std.atomic.Value(bool) = .init(false),
+            members: std.ArrayList(*Self) = .empty,
+            next_member: usize = 0,
+            memory: Budget = .{ .parent = backing_allocator, .limit = 128 * 1024 * 1024 },
+            tombstones: [max_connections]Tombstone = undefined,
+            tombstone_count: usize = 0,
+
+            fn create(local: c.sockaddr_storage, len: c.socklen_t, v6_only: c_int, share: bool) !*Group {
+                const fd = c.socket(local.ss_family, c.SOCK_DGRAM | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0);
+                if (fd < 0) return error.SocketFailed;
+                errdefer _ = c.close(fd);
+                if (local.ss_family == c.AF_INET6 and c.setsockopt(fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, @sizeOf(c_int)) != 0) return error.SocketFailed;
+                if (c.bind(fd, @ptrCast(&local), len) != 0) return error.BindFailed;
+                const self = try backing_allocator.create(Group);
+                self.* = .{ .fd = fd, .local = local, .v6_only = v6_only, .shared_listener = share };
+                return self;
+            }
+            fn destroy(self: *Group) void {
+                if (self.thread) |thread| thread.join();
+                self.members.deinit(backing_allocator);
+                _ = c.close(self.fd);
+                self.mutex.deinit();
+                std.debug.assert(self.memory.used == 0);
+                backing_allocator.destroy(self);
+            }
+            fn retain(self: *Group, peer: *Peer) void {
+                if (peer.termination.expired(now())) return;
+                // Admission counts both live peers and retained IDs, so removal
+                // of a live peer always leaves room for its tombstone.
+                std.debug.assert(self.tombstone_count < max_connections);
+                const saved = &self.tombstones[self.tombstone_count];
+                self.tombstone_count += 1;
+                saved.* = .{ .ids = undefined, .count = 1, .termination = peer.termination, .packet = peer.close_packet, .length = peer.close_len, .remote = peer.close_remote, .remote_len = peer.close_remote_len };
+                saved.ids[0] = peer.original;
+                const count = c.ngtcp2_conn_get_scid(peer.quic, null);
+                std.debug.assert(count <= 16);
+                _ = c.ngtcp2_conn_get_scid(peer.quic, &saved.ids[1]);
+                saved.count += count;
+            }
+            fn purge(self: *Group) void {
                 var i: usize = 0;
-                while (i < self.peers.items.len) {
-                    const peer = self.peers.items[i];
-                    if (peer.termination.phase == .active) {
-                        if (self.shutdown_started and now() >= self.shutdown_deadline) peer.beginTermination();
-                        if (peer.termination.phase == .active) peer.tick() catch {
-                            peer.failed = true;
-                        };
-                        if (peer.failed) peer.beginTermination();
-                    } else {
-                        _ = peer.finishCancelledBodies();
-                    }
-                    // Keep a cancelled body reachable until its final event
-                    // fits in the bounded Dart queue. This never waits here.
-                    if (peer.termination.expired(now()) and peer.finishCancelledBodies()) {
-                        _ = self.peers.swapRemove(i);
-                        peer.deinit();
+                while (i < self.tombstone_count) {
+                    if (self.tombstones[i].termination.expired(now())) {
+                        self.tombstone_count -= 1;
+                        self.tombstones[i] = self.tombstones[self.tombstone_count];
                     } else i += 1;
                 }
             }
-            // Any peers still present after the grace window are force-closed
-            // before the owner releases their native state.
-            for (self.peers.items) |peer| peer.beginTermination();
-        }
+            fn dispatch(self: *Group, packet: []const u8, remote: *c.sockaddr_storage, len: c.socklen_t) void {
+                const version = packetVersion(packet) orelse return;
+                const id = version.dcid[0..version.dcidlen];
+                for (self.tombstones[0..self.tombstone_count]) |*saved| {
+                    if (!saved.matches(id)) continue;
+                    if (sameAddress(remote, &saved.remote) and saved.termination.reply(now(), packet.len, saved.length)) {
+                        _ = c.sendto(self.fd, &saved.packet, saved.length, c.MSG_DONTWAIT, @ptrCast(&saved.remote), saved.remote_len);
+                    }
+                    return;
+                }
+                var count = self.tombstone_count;
+                for (self.members.items) |member| {
+                    count += member.peers.items.len;
+                    for (member.peers.items) |peer| {
+                        if (peer.matches(id)) {
+                            member.receive(packet, remote, len) catch {};
+                            return;
+                        }
+                    }
+                }
+                if (count >= max_connections) return;
+                for (0..self.members.items.len) |_| {
+                    self.next_member %= self.members.items.len;
+                    const member = self.members.items[self.next_member];
+                    self.next_member += 1;
+                    if (!member.started or member.server.stopped.load(.acquire) or member.shutdown_requested.load(.acquire)) continue;
+                    member.receive(packet, remote, len) catch {};
+                    return;
+                }
+            }
+            fn run(self: *Group) void {
+                while (!self.stopped.load(.acquire)) {
+                    var poll = [_]std.posix.pollfd{.{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 }};
+                    _ = std.posix.poll(&poll, 5) catch 0;
+                    self.mutex.lock();
+                    self.purge();
+                    for (0..32) |_| {
+                        var packet: [65536]u8 = undefined;
+                        var remote: c.sockaddr_storage = undefined;
+                        var len: c.socklen_t = @sizeOf(c.sockaddr_storage);
+                        const size = c.recvfrom(self.fd, &packet, packet.len, c.MSG_DONTWAIT, @ptrCast(&remote), &len);
+                        if (size < 0) break;
+                        self.dispatch(packet[0..@intCast(size)], &remote, len);
+                    }
+                    for (self.members.items) |member| {
+                        if (member.started) member.tick();
+                    }
+                    self.mutex.unlock();
+                }
+            }
+        };
         fn receive(self: *Self, packet: []const u8, remote: *c.sockaddr_storage, remote_len: c.socklen_t) !void {
             const version = packetVersion(packet) orelse return;
             var found: ?*Peer = null;
@@ -755,4 +944,63 @@ test "QUIC closing replies enforce a cumulative amplification budget" {
     try std.testing.expect(state.reply(20, 13, 40));
     try std.testing.expectEqual(@as(u64, 80), state.replied_bytes);
     try std.testing.expectEqual(@as(u64, 27), state.received_bytes);
+}
+
+test "retired QUIC IDs match original and rotated IDs without prefix matches" {
+    const R = Runtime(struct {});
+    var saved = std.mem.zeroes(R.Tombstone);
+    saved.count = 2;
+    saved.ids[0].datalen = 4;
+    @memcpy(saved.ids[0].data[0..4], "orig");
+    saved.ids[1].datalen = 7;
+    @memcpy(saved.ids[1].data[0..7], "rotated");
+    try std.testing.expect(saved.matches("orig"));
+    try std.testing.expect(saved.matches("rotated"));
+    try std.testing.expect(!saved.matches("ori"));
+    try std.testing.expect(!saved.matches("original"));
+    try std.testing.expect(!saved.matches(""));
+}
+
+test "UDP group purges expired closing IDs while preserving live draining IDs" {
+    const R = Runtime(struct {});
+    var group: R.Group = .{ .fd = -1, .local = std.mem.zeroes(c.sockaddr_storage), .v6_only = 0, .shared_listener = true };
+    defer group.mutex.deinit();
+    group.tombstone_count = 3;
+    for (group.tombstones[0..3]) |*saved| {
+        saved.* = std.mem.zeroes(R.Tombstone);
+        saved.termination.phase = .closing;
+    }
+    group.tombstones[1].termination.phase = .draining;
+    group.tombstones[1].termination.deadline = std.math.maxInt(u64);
+    group.purge();
+    try std.testing.expectEqual(@as(usize, 1), group.tombstone_count);
+    try std.testing.expectEqual(Termination{ .phase = .draining, .deadline = std.math.maxInt(u64) }, group.tombstones[0].termination);
+    group.tombstones[0].termination.deadline = 0;
+    group.purge();
+    try std.testing.expectEqual(@as(usize, 0), group.tombstone_count);
+}
+
+test "UDP registry mutex serializes native callers" {
+    const Counter = struct {
+        mutex: Mutex = .{},
+        value: usize = 0,
+        fn increment(self: *@This()) void {
+            for (0..1000) |_| {
+                self.mutex.lock();
+                self.value += 1;
+                self.mutex.unlock();
+            }
+        }
+    };
+    var counter: Counter = .{};
+    defer counter.mutex.deinit();
+    var threads: [4]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, Counter.increment, .{&counter});
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqual(@as(usize, 4000), counter.value);
 }

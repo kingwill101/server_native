@@ -198,18 +198,23 @@ class RebindingRelay(asyncio.DatagramProtocol):
         self.client = None
         self.upstream = None
         self.sockets = []
+        self.first_initial = None
+        self.responses = []
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, address):
         self.client = address
+        if self.first_initial is None:
+            self.first_initial = data
         self.upstream.sendto(data, self.destination)
 
     async def rebind(self):
         relay = self
         class Upstream(asyncio.DatagramProtocol):
             def datagram_received(self, data, address):
+                relay.responses.append(data)
                 if relay.client:
                     relay.transport.sendto(data, relay.client)
         transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
@@ -317,7 +322,82 @@ async def exercise(client):
         assert await client.get("/reuse") == b"GET /reuse  "
 
 
+async def lifecycle_stress(port):
+    config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
+    config.verify_mode = ssl.CERT_NONE
+    async def worker(index):
+        async with connect("127.0.0.1", port, configuration=config,
+                           create_protocol=Client) as client:
+            payload = bytes([index]) * 16384
+            for _ in range(8):
+                assert await client.get("/echo", payload) == payload
+            stream, _ = client.request("/abandoned", payload, end=False)
+            await asyncio.sleep(0.01)
+            client.cancel(stream)
+            assert await client.get("/echo", b"alive") == b"alive"
+    await asyncio.gather(*(worker(i) for i in range(8)))
+    print("aioquic: lifecycle batch passed")
+
+
+async def shared_listeners(port, reverse=False):
+    from contextlib import AsyncExitStack
+    config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
+    config.verify_mode = ssl.CERT_NONE
+    relays = []
+    try:
+        async with AsyncExitStack() as stack:
+            clients = []
+            owners = []
+            for _ in range(2):
+                _, relay = await asyncio.get_running_loop().create_datagram_endpoint(
+                    lambda: RebindingRelay(port), local_addr=("127.0.0.1", 0))
+                await relay.rebind()
+                relays.append(relay)
+                client = await stack.enter_async_context(connect(
+                    "127.0.0.1", relay.transport.get_extra_info("sockname")[1],
+                    configuration=config, create_protocol=Client))
+                clients.append(client)
+                owners.append(await client.get("/id"))
+            assert set(owners) == {b"one", b"two"}, owners
+            for i, client in enumerate(clients):
+                for _ in range(4):
+                    assert await client.get("/id") == owners[i]
+                await relays[i].rebind()
+                assert await client.get("/id") == owners[i], "rebinding changed owner"
+            if reverse:
+                clients.reverse()
+                owners.reverse()
+                relays.reverse()
+            shutdown = "/shutdown?graceful=true" if reverse else "/shutdown"
+            assert await clients[0].get(shutdown) == owners[0]
+            # aioquic delivers ConnectionTerminated only after its own draining
+            # timeout. Replay while the server must still retain the closed ID.
+            async with asyncio.timeout(5):
+                while clients[0]._quic._close_event is None:
+                    await asyncio.sleep(0.001)
+            relays[0].responses.clear()
+            relays[0].upstream.sendto(relays[0].first_initial, relays[0].destination)
+            await asyncio.sleep(0.02)
+            assert not any(data[0] & 0x80 for data in relays[0].responses), (
+                "departed listener's Initial started a new handshake")
+            for _ in range(8):
+                async with connect("127.0.0.1", port, configuration=config,
+                                   create_protocol=Client) as fresh:
+                    assert await fresh.get("/id") == owners[1]
+            assert await clients[1].get("/id") == owners[1]
+        print("aioquic: shared listeners preserve ownership, rebinding and close isolation")
+    finally:
+        for relay in relays:
+            relay.close()
+
+
 async def main(port, mode):
+    if mode == "lifecycle-stress":
+        await lifecycle_stress(port)
+        return
+    if mode in ("shared", "shared-reverse-graceful"):
+        await shared_listeners(port, reverse=mode != "shared")
+        return
     if mode == "address-validation":
         await address_validation(port)
         return

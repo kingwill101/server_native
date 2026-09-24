@@ -185,11 +185,12 @@ counts are bounded independently, including empty frames.
 
 ## HTTP/3 runtime status
 
-The initial runtime uses one native UDP thread to own ngtcp2 connections,
+The runtime uses one native UDP thread per bound address/port to own ngtcp2 connections,
 BoringSSL sessions, nghttp3 streams, expiry processing and response progress.
 It accepts QUIC v1, routes connection IDs, opens control/QPACK streams, returns
 flow-control credit, tracks accepted and acknowledged output, and releases UDP
-on shutdown. Admission is limited to 128 connections with 100 simultaneous
+when the last listener closes. Admission is limited to 128 connections per UDP
+group (including retained closed IDs), with 100 simultaneous
 request streams per connection. Handshakes time out after 10 seconds; idle
 connections after 30 seconds. Active migration is disabled in transport
 parameters. HTTP/1 and HTTP/2 advertise a live listener through Alt-Svc.
@@ -217,7 +218,7 @@ QUIC response chunks retain stable storage until nghttp3 reports acknowledgement
 Response draining pauses at a 256 KiB transport watermark; one incoming frame
 can exceed that watermark. The 32 MiB request buffer and 4 MiB response frame
 limits are supplemented by hierarchical allocation limits: 16 MiB per QUIC
-connection and 128 MiB per UDP listener. These cover Zig-owned peer/stream data
+connection and 128 MiB per UDP group, shared across its listeners. These cover Zig-owned peer/stream data
 and ngtcp2/nghttp3 heaps, including allocation metadata. Allocation failure
 terminates the affected protocol operation; release restores capacity. BoringSSL
 heaps, kernel socket buffers, and Dart application buffers are outside these
@@ -235,7 +236,7 @@ Run the independent client gate explicitly (Python dependency is test-only):
 ```sh
 python3 -m venv /tmp/server-native-quic-client
 /tmp/server-native-quic-client/bin/pip install aioquic==1.3.0
-AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart
+AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart test/http3_ipv6_test.dart test/http3_shared_test.dart --concurrency=1
 ```
 
 Curl must support HTTP/3. The aioquic cases are reported as skipped when
@@ -260,7 +261,10 @@ Draining emits no packets. Late packets do not extend the retention deadline.
 Incomplete direct request bodies receive their terminal queue frame. If Dart's
 queue is full, cleanup retries without blocking the UDP thread and retains the
 request even after the protocol retention deadline until that frame is queued.
-Forced listener shutdown can still release all retained state immediately.
+When the final listener shuts down, closing UDP permits immediate release of
+all retained state. With another shared listener still active, compact records
+retain the original and issued connection IDs, termination deadline, destination,
+and cached close packet after the departing owner is freed.
 
 Graceful HTTP/3 shutdown sends a notice, waits at least two measured RTTs,
 then sends final GOAWAY and rejects new streams. A two-second listener deadline
@@ -275,10 +279,40 @@ TCP applies the requested IPv6-only option and UDP inherits it explicitly.
 availability for IPv6-only listeners, and UDP release in bridge/direct modes.
 The shared HttpServer compatibility suite checks the TCP behavior against dart:io.
 
-**Step 11 remains open.** Remaining production gates include shared UDP connection
-routing and sustained lifecycle/resource stress, including allocations outside
-the native budgets. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
-socket, so it releases retained connections immediately.
+Shared listeners in one process use a single UDP socket and dispatcher, matching
+[Dart shared binding across isolates](https://api.dart.dev/dart-io/HttpServer/bind.html).
+New connections are distributed among active listeners; original and issued
+connection IDs route established connections regardless of source-port changes.
+Each listener keeps its own TLS configuration, backend, Dart port, and shutdown
+state. Native registry/group locks serialize registration and teardown with the
+UDP owner; request handling and port notifications remain asynchronous.
+`http3_shared_test.dart` combines bridge/direct listeners within one isolate and
+across isolates, changes source ports, closes one listener, replays its Initial,
+and checks that the survivor accepts new connections, covering both listener
+orders and forced/graceful close. Independent OS processes
+are not joined into this registry.
+
+`http3_lifecycle_stress_test.dart` repeatedly starts a listener, runs eight
+concurrent independent clients with uploads and incomplete-stream cancellation,
+closes the listener, and rebinds UDP. On Linux it compares descriptor counts
+after warm-up and sixteen cycles per backend mode. Native teardown also asserts
+that all budgeted allocations have been returned. Run it separately, because
+file-descriptor counts are process-wide:
+
+```sh
+AIOQUIC_PYTHON=/tmp/server-native-quic-client/bin/python SERVER_NATIVE_BACKEND=zig dart test test/http3_lifecycle_stress_test.dart --concurrency=1
+```
+
+Set `HTTP3_STRESS_ROUNDS` for longer runs. These checks do not establish whole-
+process memory stability under sustained production load: BoringSSL, kernel,
+and Dart application allocations remain outside the native allocator accounting.
+The HTTP/3 CI command runs test files serially; each file still exercises
+concurrent clients and streams. A parallel local suite, run alongside a native
+ReleaseSafe dependency rebuild, intermittently observed `EADDRINUSE` on immediate
+UDP rebinding. The socket was gone by inspection, and targeted/serial runs and
+standalone Dart/libc probes did not reproduce it. This remains an unresolved
+load-related validation case, not a proven native leak or a completed gate.
+**Step 11 remains open** for sustained-load and parallel rebind validation.
 
 ## Zig prebuilt release gate
 

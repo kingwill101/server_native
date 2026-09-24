@@ -81,4 +81,9 @@ jobs:
       - name: Run Zig HTTP/3 interoperability and streaming gates
         env:
           SERVER_NATIVE_BACKEND: zig
-        run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart test/http3_ipv6_test.dart
+        run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart test/http3_ipv6_test.dart test/http3_shared_test.dart --concurrency=1
+
+      - name: Run isolated HTTP/3 lifecycle resource gate
+        env:
+          SERVER_NATIVE_BACKEND: zig
+        run: dart test test/http3_lifecycle_stress_test.dart --concurrency=1
