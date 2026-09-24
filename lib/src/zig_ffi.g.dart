@@ -19,3 +19,43 @@ external int server_native_dart_api_initialize(ffi.Pointer<ffi.Void> data);
   symbol: 'server_native_dart_post_integer',
 )
 external bool server_native_dart_post_integer(int port_id, int value);
+
+@ffi.Native<ffi.Pointer<ffi.Void> Function(ffi.UintPtr)>(
+  symbol: 'server_native_zig_queue_create',
+)
+external ffi.Pointer<ffi.Void> server_native_zig_queue_create(
+  int slot_capacity,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_queue_destroy',
+)
+external void server_native_zig_queue_destroy(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<
+  ffi.Bool Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Int64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.UintPtr,
+  )
+>(symbol: 'server_native_zig_queue_push')
+external bool server_native_zig_queue_push(
+  ffi.Pointer<ffi.Void> handle,
+  int request_id,
+  ffi.Pointer<ffi.Uint8> payload,
+  int payload_len,
+);
+
+@ffi.Native<ffi.UintPtr Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_queue_length',
+)
+external int server_native_zig_queue_length(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<ffi.Bool Function(ffi.Pointer<ffi.Void>, ffi.Int64)>(
+  symbol: 'server_native_zig_queue_post_next',
+)
+external bool server_native_zig_queue_post_next(
+  ffi.Pointer<ffi.Void> handle,
+  int port_id,
+);
