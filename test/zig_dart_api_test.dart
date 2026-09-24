@@ -69,7 +69,7 @@ void main() {
       );
     });
 
-    test('encodes request-start heads in Zig and posts wire bytes', () async {
+    test('Zig encodes and posts request-start frames', () async {
       final queue = server_native_zig_queue_create(2);
       expect(queue, isNot(ffi.nullptr));
       addTearDown(() => server_native_zig_queue_destroy(queue));
