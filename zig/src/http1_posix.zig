@@ -114,6 +114,7 @@ pub fn listen(
     port: u16,
     backlog: u32,
     shared: bool,
+    v6_only: bool,
 ) !Listener {
     const host_z = try allocator.dupeZ(u8, host);
     defer allocator.free(host_z);
@@ -136,8 +137,15 @@ pub fn listen(
     while (current) |address| : (current = address.ai_next) {
         const fd = c.socket(address.ai_family, address.ai_socktype, address.ai_protocol);
         if (fd < 0) continue;
-        errdefer _ = c.close(fd);
+        var owned = true;
+        defer if (owned) {
+            _ = c.close(fd);
+        };
 
+        if (address.ai_family == c.AF_INET6) {
+            var option: c_int = @intFromBool(v6_only);
+            if (c.setsockopt(fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &option, @sizeOf(c_int)) != 0) continue;
+        }
         var reuse: c_int = 1;
         _ = c.setsockopt(
             fd,
@@ -165,6 +173,7 @@ pub fn listen(
         if (c.listen(fd, requested_backlog) != 0) continue;
 
         const actual_port = try boundPort(fd, address.ai_family);
+        owned = false;
         return .{ .fd = fd, .port = actual_port };
     }
 

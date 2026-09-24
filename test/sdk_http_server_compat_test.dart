@@ -671,6 +671,41 @@ void main() {
       );
     }
 
+    test('v6Only wildcard binding matches dart:io', () async {
+      if (!await _supportsIPv6()) {
+        markTestSkipped('IPv6 unavailable');
+        return;
+      }
+      for (final backend in _Backend.values) {
+        for (final v6Only in [false, true]) {
+          final server = await _bindServer(
+            backend,
+            InternetAddress.anyIPv6,
+            0,
+            v6Only: v6Only,
+          );
+          server.listen((request) async {
+            request.response.statusCode = 204;
+            await request.response.close();
+          });
+          try {
+            expect(await _singleRequestStatus('::1', server.port), 204);
+            if (v6Only) {
+              final ipv4 = await ServerSocket.bind(
+                InternetAddress.anyIPv4,
+                server.port,
+              );
+              await ipv4.close();
+            } else {
+              expect(await _singleRequestStatus('127.0.0.1', server.port), 204);
+            }
+          } finally {
+            await server.close(force: true);
+          }
+        }
+      }
+    });
+
     test('bind(shared:true) parity on IPv4/IPv6 loopback', () async {
       final hosts = <String>['127.0.0.1'];
       if (await _supportsIPv6()) {

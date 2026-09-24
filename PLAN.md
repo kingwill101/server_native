@@ -69,7 +69,9 @@ Initial scan found:
   - [x] Progressive request/response streaming in bridge/direct modes with ACK-retained QUIC response chunks.
   - [x] Staged GOAWAY, bounded asynchronous application shutdown, blackholed-path and Dart responsiveness gates.
   - [x] Bound native HTTP/3 connection/listener allocations and direct response queues; verify paused upload/download backpressure with independent aioquic clients in bridge/direct modes.
-  - [ ] Migration-disabled path tests, address-validation/Retry policy, IPv6/shared UDP routing, and sustained resource stress (including TLS/Dart allocations outside native budgets).
+  - [x] Advertised migration-disabled policy, NAT port rebinding/path challenge, forged-path rejection, and unvalidated-address amplification gates; explicit no-Retry policy.
+  - [x] IPv6-only/dual-stack UDP binding and release, with TCP `v6Only` behavior checked against dart:io.
+  - [ ] Shared UDP connection routing and sustained resource stress (including TLS/Dart allocations outside native budgets).
 - [ ] Extend prebuilt artifacts and CI for both libraries and all supported targets, keeping Rust release artifacts unchanged while adding a separate verified Zig asset/manifest path.
 - [ ] Make Zig selectable/default only after all required stability gates; preserve Rust fallback and document the transition.
 

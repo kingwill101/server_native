@@ -194,6 +194,21 @@ request streams per connection. Handshakes time out after 10 seconds; idle
 connections after 30 seconds. Active migration is disabled in transport
 parameters. HTTP/1 and HTTP/2 advertise a live listener through Alt-Svc.
 
+The address-validation policy currently uses handshake proof; the listener issues
+neither Retry nor NEW_TOKEN and does not treat client-supplied tokens as proof.
+ngtcp2 enforces the pre-validation three-times amplification limit. Independent
+tests withhold every handshake response, replay an Initial, and repeat with an
+untrusted token, checking cumulative UDP byte counts. Connection admission,
+handshake deadlines, and allocator budgets bound native state, but stateless
+Retry under connection-flood load remains a possible future policy.
+
+The migration test checks the advertised `disable_active_migration` parameter,
+injects an undecryptable packet with a live connection ID from another socket,
+and then changes the legitimate client's source port. The established connection
+must remain usable and the client must observe a PATH_CHALLENGE. NAT rebinding
+still requires path validation when active migration is disabled; see
+[RFC 9000 sections 8–9](https://www.rfc-editor.org/rfc/rfc9000.html#section-8).
+
 HTTP/2 and HTTP/3 share `proxy_request.zig`, preserving the frame codec and
 asynchronous bridge/direct handler progress. Requests and responses stream
 incrementally. The aioquic streaming gate echoes 6 MiB in segments, waiting for
@@ -255,9 +270,14 @@ native teardown on a worker isolate. Forced shutdown skips the grace period.
 `http3_shutdown_test.dart` verifies both GOAWAY frames, a blackholed path, and
 Dart timer progress during close in bridge and direct modes.
 
-**Step 11 remains open.** Remaining production gates include migration-disabled
-path tests, address-validation/Retry policy, IPv6/shared UDP routing, and sustained
-lifecycle/resource stress, including allocations outside the native budgets. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
+TCP applies the requested IPv6-only option and UDP inherits it explicitly.
+`http3_ipv6_test.dart` checks IPv6 and IPv4-mapped QUIC traffic, IPv4 port
+availability for IPv6-only listeners, and UDP release in bridge/direct modes.
+The shared HttpServer compatibility suite checks the TCP behavior against dart:io.
+
+**Step 11 remains open.** Remaining production gates include shared UDP connection
+routing and sustained lifecycle/resource stress, including allocations outside
+the native budgets. Forced listener shutdown emits CONNECTION_CLOSE and closes the UDP
 socket, so it releases retained connections immediately.
 
 ## Zig prebuilt release gate

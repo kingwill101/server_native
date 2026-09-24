@@ -14,6 +14,8 @@ void main() {
       'loss',
       'close-loss',
       'drain-replay',
+      'address-validation',
+      'rebinding',
     ]) {
       final independent = mode != 'curl';
       test(

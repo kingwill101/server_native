@@ -93,6 +93,15 @@ pub fn Runtime(comptime Server: type) type {
             const fd = c.socket(local.ss_family, c.SOCK_DGRAM | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0);
             if (fd < 0) return error.SocketFailed;
             errdefer _ = c.close(fd);
+            // UDP must honor the same IPv6-only contract as the TCP listener.
+            // OS defaults can differ from the explicitly configured TCP option.
+            if (local.ss_family == c.AF_INET6) {
+                var v6_only: c_int = 0;
+                var option_len: c.socklen_t = @sizeOf(c_int);
+                if (c.getsockopt(server.listener.fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, &option_len) != 0 or
+                    c.setsockopt(fd, c.IPPROTO_IPV6, c.IPV6_V6ONLY, &v6_only, @sizeOf(c_int)) != 0)
+                    return error.SocketFailed;
+            }
             if (c.bind(fd, @ptrCast(&local), len) != 0) return error.BindFailed;
             var tls = try h3.TlsContext.initServer();
             errdefer tls.deinit();

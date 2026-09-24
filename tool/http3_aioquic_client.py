@@ -7,6 +7,9 @@ from aioquic.asyncio import QuicConnectionProtocol, connect
 from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.connection import QuicConnection
+from aioquic.quic.logger import QuicLogger
+from aioquic.quic.packet import pull_quic_transport_parameters
 from aioquic.quic.events import ConnectionTerminated, StreamDataReceived
 from aioquic.buffer import Buffer, BufferReadError
 
@@ -14,6 +17,12 @@ from aioquic.buffer import Buffer, BufferReadError
 class Client(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.peer_parameters = None
+        parse_parameters = self._quic._parse_transport_parameters
+        def capture_parameters(data, from_session_ticket=False):
+            self.peer_parameters = pull_quic_transport_parameters(Buffer(data=data))
+            return parse_parameters(data, from_session_ticket=from_session_ticket)
+        self._quic._parse_transport_parameters = capture_parameters
         self.http = H3Connection(self._quic)
         self.pending = {}
         self.bodies = {}
@@ -146,6 +155,103 @@ class Relay(asyncio.DatagramProtocol):
         self.transport.close()
 
 
+class DatagramCounter(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.received = 0
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, address):
+        self.received += len(data)
+
+
+async def address_validation(port):
+    # Never deliver a server packet to QUIC, so the peer cannot prove receipt
+    # or complete the handshake. Repeat with a token the server did not issue.
+    loop = asyncio.get_running_loop()
+    for token in (b"", b"untrusted-address-token"):
+        config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
+        config.token = token
+        connection = QuicConnection(configuration=config)
+        connection.connect(("127.0.0.1", port), now=loop.time())
+        packets = connection.datagrams_to_send(now=loop.time())
+        transport, counter = await loop.create_datagram_endpoint(
+            DatagramCounter, local_addr=("127.0.0.1", 0))
+        try:
+            sent = 0
+            for _ in range(2):
+                for packet, destination in packets:
+                    transport.sendto(packet, destination)
+                    sent += len(packet)
+                await asyncio.sleep(0.6)
+                assert 0 < counter.received <= 3 * sent, (sent, counter.received)
+        finally:
+            transport.close()
+    print("aioquic: unvalidated address byte limits passed")
+
+
+class RebindingRelay(asyncio.DatagramProtocol):
+    """Keep the client-facing socket stable while changing the server-side port."""
+    def __init__(self, port):
+        self.destination = ("127.0.0.1", port)
+        self.client = None
+        self.upstream = None
+        self.sockets = []
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, address):
+        self.client = address
+        self.upstream.sendto(data, self.destination)
+
+    async def rebind(self):
+        relay = self
+        class Upstream(asyncio.DatagramProtocol):
+            def datagram_received(self, data, address):
+                if relay.client:
+                    relay.transport.sendto(data, relay.client)
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            Upstream, local_addr=("127.0.0.1", 0))
+        old = self.upstream
+        self.upstream = transport
+        self.sockets.append(transport)
+        if old:
+            assert old.get_extra_info("sockname") != transport.get_extra_info("sockname")
+            old.close()
+
+    def close(self):
+        self.transport.close()
+        for transport in self.sockets:
+            transport.close()
+
+
+async def rebinding(client, relay, logger):
+    assert client.peer_parameters.disable_active_migration is True
+    assert await client.get("/before-rebind") == b"GET /before-rebind  "
+    # Knowing a live destination CID is insufficient to move an authenticated
+    # connection. An unrelated socket injects an undecryptable short packet.
+    transport, counter = await asyncio.get_running_loop().create_datagram_endpoint(
+        DatagramCounter, local_addr=("127.0.0.1", 0))
+    try:
+        transport.sendto(b"\x40" + client._quic._peer_cid.cid + bytes(64), relay.destination)
+        await asyncio.sleep(0.1)
+        assert counter.received == 0, "server replied to forged path"
+        assert await client.get("/after-forgery") == b"GET /after-forgery  "
+    finally:
+        transport.close()
+    await relay.rebind()
+    assert await client.get("/after-rebind", b"x" * 131072) == (
+        b"POST /after-rebind  " + b"x" * 131072)
+    await asyncio.sleep(0.1)
+    frames = [frame for trace in logger.to_dict()["traces"]
+              for event in trace["events"] if event["name"] == "transport:packet_received"
+              for frame in event["data"].get("frames", [])]
+    assert any(frame["frame_type"] == "path_challenge" for frame in frames), frames
+    assert await client.get("/validated-path") == b"GET /validated-path  "
+
+
 async def streaming(client):
     stream, done = client.request("/stream", b"", end=False)
     chunks = client.chunks[stream] = asyncio.Queue()
@@ -212,7 +318,15 @@ async def exercise(client):
 
 
 async def main(port, mode):
+    if mode == "address-validation":
+        await address_validation(port)
+        return
     relay = None
+    if mode == "rebinding":
+        _, relay = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: RebindingRelay(port), local_addr=("127.0.0.1", 0))
+        await relay.rebind()
+        port = relay.transport.get_extra_info("sockname")[1]
     if mode in ("loss", "close-loss", "drain-replay", "shutdown-loss"):
         _, relay = await asyncio.get_running_loop().create_datagram_endpoint(
             lambda: Relay(port, mode == "loss"), local_addr=("127.0.0.1", 0))
@@ -220,11 +334,15 @@ async def main(port, mode):
     config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
     if mode == "pressure":
         config.max_stream_data = 32768
+    if mode == "rebinding":
+        config.quic_logger = QuicLogger()
     config.verify_mode = ssl.CERT_NONE  # Local test certificate only.
     try:
         async with connect("127.0.0.1", port, configuration=config,
                            create_protocol=Client) as client:
-            if mode == "pressure":
+            if mode == "rebinding":
+                await rebinding(client, relay, config.quic_logger)
+            elif mode == "pressure":
                 await pressure(client)
             elif mode in ("shutdown", "shutdown-loss"):
                 assert await client.get("/shutdown") == b"closing"

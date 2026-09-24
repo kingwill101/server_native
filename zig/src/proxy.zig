@@ -83,6 +83,7 @@ pub const ProxyServer = struct {
             config.port,
             config.backlog,
             config.shared != 0,
+            config.v6_only != 0,
         ) catch return null;
         var tls: ?http1.TlsContext = null;
         if (config.tls_cert_path != null or config.tls_key_path != null) {

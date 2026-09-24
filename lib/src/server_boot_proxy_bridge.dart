@@ -196,6 +196,9 @@ Future<void> _handleBridgeSocket(
         onRequestCompleted?.call();
       }
     }
+  } on SocketException {
+    // Native cancellation and protocol-error shutdown close this internal socket.
+    transportFailed = true;
   } catch (error, stack) {
     transportFailed = true;
     stderr.writeln('[server_native] bridge socket error: $error\n$stack');
