@@ -10,8 +10,13 @@ final class _BridgeRequestHeaders implements HttpHeaders {
     for (var i = 0; i < frame.headerCount; i++) {
       final name = frame.headerNameAt(i);
       final normalized = _asciiLower(name);
+      final value = frame.headerValueAt(i);
+      // dart:io treats an empty Connection field as an empty token list.
+      if (normalized == HttpHeaders.connectionHeader && value.trim().isEmpty) {
+        continue;
+      }
       final values = _headers.putIfAbsent(normalized, () => <String>[]);
-      values.add(frame.headerValueAt(i));
+      values.add(value);
       _originalNames[normalized] = name;
     }
     if (stripTransferEncoding) {

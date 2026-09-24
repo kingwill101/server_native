@@ -23,7 +23,8 @@ pub fn serveConnection(
     var chunked_body = false;
 
     while (header_end == null) {
-        const count = try http1.receiveConnection(connection, &scratch);
+        if (server.stopped.load(.acquire)) return false;
+        const count = (try http1.receiveTimeoutConnection(connection, &scratch, 50)) orelse continue;
         if (count == 0) return false;
         try input.appendSlice(allocator, scratch[0..count]);
         if (input.items.len > max_header_bytes) return error.HeadersTooLarge;

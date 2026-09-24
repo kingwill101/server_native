@@ -13,7 +13,8 @@ import 'package:test/test.dart';
 
 enum _Backend {
   dartIo('dart:io'),
-  native('server_native');
+  native('server_native direct'),
+  bridge('server_native bridge');
 
   const _Backend(this.label);
   final String label;
@@ -37,6 +38,7 @@ Future<HttpServer> _bindServer(
         shared: shared,
       );
     case _Backend.native:
+    case _Backend.bridge:
       return NativeHttpServer.bind(
         address,
         port,
@@ -44,7 +46,7 @@ Future<HttpServer> _bindServer(
         v6Only: v6Only,
         shared: shared,
         http3: false,
-        nativeCallback: true,
+        nativeCallback: backend == _Backend.native,
       );
   }
 }
@@ -261,6 +263,173 @@ Future<bool> _headCloseCompletesWithContentLengthError(_Backend backend) async {
 void main() {
   group('SDK HttpServer compatibility', () {
     for (final backend in _Backend.values) {
+      test(
+        '${backend.label}: streamed upload and response preserve metadata',
+        () async {
+          final server = await _bindServer(
+            backend,
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          final sub = server.listen((request) async {
+            expect(request.method, 'POST');
+            expect(request.uri.path, '/a%20b');
+            expect(request.uri.queryParametersAll['q'], ['one', 'two']);
+            expect(request.headers['x-test'], ['first, second']);
+            expect(request.cookies.single.name, 'session');
+            expect(request.cookies.single.value, 'abc');
+            final body = await utf8.decoder.bind(request).join();
+            request.response.cookies.add(
+              Cookie('result', 'ok')..httpOnly = true,
+            );
+            await request.response.addStream(
+              Stream.fromIterable([
+                utf8.encode('received:'),
+                utf8.encode(body),
+              ]),
+            );
+            await request.response.close();
+          });
+          final client = HttpClient();
+          try {
+            final request = await client.postUrl(
+              Uri.parse('http://127.0.0.1:${server.port}/a%20b?q=one&q=two'),
+            );
+            request.headers.add('x-test', 'first');
+            request.headers.add('x-test', 'second');
+            request.cookies.add(Cookie('session', 'abc'));
+            await request.addStream(
+              Stream.fromIterable([utf8.encode('hello '), utf8.encode('世界')]),
+            );
+            final response = await request.close();
+            expect(
+              await utf8.decoder.bind(response).join(),
+              'received:hello 世界',
+            );
+            expect(response.cookies.single.name, 'result');
+            expect(response.cookies.single.httpOnly, isTrue);
+          } finally {
+            client.close(force: true);
+            await sub.cancel();
+            await server.close(force: true);
+          }
+        },
+      );
+
+      test(
+        '${backend.label}: bodyless responses do not corrupt keep-alive',
+        () async {
+          final server = await _bindServer(
+            backend,
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          final ports = <int>[];
+          final sub = server.listen((request) async {
+            if (request.method == 'HEAD') {
+              request.response.contentLength = 123;
+            } else if (request.uri.path == '/204') {
+              request.response.statusCode = 204;
+            } else if (request.uri.path == '/304') {
+              request.response.statusCode = 304;
+            } else {
+              request.response.write('still alive');
+            }
+            await request.response.close();
+          });
+          final client = HttpClient()..maxConnectionsPerHost = 1;
+          try {
+            for (final entry in [
+              ('HEAD', '/', 200),
+              ('GET', '/204', 204),
+              ('GET', '/304', 304),
+              ('GET', '/final', 200),
+            ]) {
+              final request = await client.openUrl(
+                entry.$1,
+                Uri.parse('http://127.0.0.1:${server.port}${entry.$2}'),
+              );
+              final response = await request.close();
+              ports.add(response.connectionInfo!.localPort);
+              expect(response.statusCode, entry.$3);
+              expect(
+                await utf8.decoder.bind(response).join(),
+                entry.$2 == '/final' ? 'still alive' : '',
+              );
+            }
+            expect(ports.toSet(), hasLength(1));
+          } finally {
+            client.close(force: true);
+            await sub.cancel();
+            await server.close(force: true);
+          }
+        },
+      );
+
+      test(
+        '${backend.label}: redirect preserves status and location',
+        () async {
+          final server = await _bindServer(
+            backend,
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          final sub = server.listen((request) async {
+            await request.response.redirect(
+              Uri.parse('/next?q=value'),
+              status: 307,
+            );
+          });
+          final client = HttpClient();
+          try {
+            final request = await client.getUrl(
+              Uri.parse('http://127.0.0.1:${server.port}/'),
+            );
+            request.followRedirects = false;
+            final response = await request.close();
+            expect(response.statusCode, 307);
+            expect(response.headers.value('location'), '/next?q=value');
+            expect(
+              await response.fold<int>(0, (size, bytes) => size + bytes.length),
+              0,
+            );
+          } finally {
+            client.close(force: true);
+            await sub.cancel();
+            await server.close(force: true);
+          }
+        },
+      );
+
+      test(
+        '${backend.label}: graceful close completes with idle keep-alive client',
+        () async {
+          final server = await _bindServer(
+            backend,
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          server.listen((request) async {
+            request.response.write('ok');
+            await request.response.close();
+          });
+          final client = HttpClient();
+          try {
+            final request = await client.getUrl(
+              Uri.parse('http://127.0.0.1:${server.port}/'),
+            );
+            final response = await request.close();
+            expect(await utf8.decoder.bind(response).join(), 'ok');
+            // Keep the client open while awaiting close: destroying it first
+            // would hide a native thread blocked reading the next request.
+            await server.close().timeout(const Duration(seconds: 3));
+          } finally {
+            client.close(force: true);
+            await server.close(force: true);
+          }
+        },
+      );
+
       test('${backend.label}: default response headers', () async {
         final headers = await _fetchHeadersSnapshot(backend);
         expect(
@@ -486,19 +655,10 @@ void main() {
         },
       );
 
-      test(
-        '${backend.label}: empty Connection header value is preserved on request',
-        () async {
-          final values = await _captureEmptyConnectionHeaderValues(backend);
-          if (backend == _Backend.dartIo && values.isEmpty) {
-            markTestSkipped(
-              'Current dart:io drops an empty Connection header value',
-            );
-            return;
-          }
-          expect(values, equals(const <String>['']));
-        },
-      );
+      test('${backend.label}: empty Connection header has no values', () async {
+        final values = await _captureEmptyConnectionHeaderValues(backend);
+        expect(values, isEmpty);
+      });
 
       test(
         '${backend.label}: HEAD close does not fail when content-length exceeds body bytes',
