@@ -50,6 +50,7 @@ pub const ProxyServer = struct {
     accept_thread: ?std.Thread = null,
     port: u16,
     backend_kind: u8 = 0,
+    benchmark_mode: u8 = 0,
     backend_host: []const u8 = &.{},
     backend_path: []const u8 = &.{},
     backend_port: u16 = 0,
@@ -76,7 +77,7 @@ pub const ProxyServer = struct {
         if (config.host == null) return null;
         const host = std.mem.span(config.host);
         if (host.len == 0) return null;
-        if (config.backend_kind > 1) return null;
+        if (config.backend_kind > 1 or config.benchmark_mode > 2) return null;
         const listener = http1.listen(
             allocator,
             host,
@@ -145,6 +146,7 @@ pub const ProxyServer = struct {
             .listener = listener,
             .port = listener.port,
             .backend_kind = config.backend_kind,
+            .benchmark_mode = config.benchmark_mode,
             .backend_host = backend_host,
             .backend_path = backend_path,
             .backend_port = config.backend_port,
@@ -512,6 +514,9 @@ test "proxy rejects invalid configuration without modifying the output port" {
     config.backend_kind = 2;
     try std.testing.expect(ProxyServer.create(&config, &port) == null);
     config.backend_kind = 0;
+    config.benchmark_mode = 3;
+    try std.testing.expect(ProxyServer.create(&config, &port) == null);
+    config.benchmark_mode = 0;
     config.tls_cert_path = "missing";
     try std.testing.expect(ProxyServer.create(&config, &port) == null);
     config.tls_cert_path = null;

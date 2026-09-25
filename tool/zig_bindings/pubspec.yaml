@@ -1,0 +1,11 @@
+name: server_native_zig_bindings_tool
+publish_to: none
+environment:
+  sdk: ^3.13.0
+dependencies:
+  # Published 0.2.0 can build our asset, but its generator targets Zig 0.15.
+  # Keep the Zig 0.16 generator separate from the published package dependencies.
+  native_toolchain_zig:
+    git:
+      url: https://github.com/kingwill101/native_toolchain_zig.dart.git
+      ref: 3ffb77d6c3d33a92c5252059f7f26c94c8c96636

@@ -66,6 +66,14 @@ fn requestHead(request: *Request) bridge_protocol.RequestHead {
 pub fn progressRequest(allocator: std.mem.Allocator, server: anytype, request: *Request) !void {
     if (request.request_id) |id| request.consumed_body += server.takeRequestCredit(id);
     if (!request.headers_ready) return;
+    if (server.benchmark_mode != 0) {
+        if (!request.response.ready) try bridge_io.benchmarkResponse(allocator, &request.response);
+        request.consumed_body += request.body.items.len;
+        request.body.clearRetainingCapacity();
+        request.response_done = true;
+        request.direct_stage = .waiting;
+        return;
+    }
     if (request.response_done and request.direct_stage == .waiting) return;
     if (!request.started) {
         const head = requestHead(request);
@@ -274,6 +282,7 @@ test "progressive direct request waits for queue capacity and never invents EOF"
         next_request_id: std.atomic.Value(u64) = .init(1),
         http3: ?u8 = null,
         port: u16 = 0,
+        benchmark_mode: u8 = 0,
         outstanding: usize = 0,
         credit: usize = 0,
         pub fn bridgeEnabled(_: *@This()) bool {
@@ -414,4 +423,32 @@ test "cancellation before dispatch and after request EOF never produces a termin
     request.direct_stage = .waiting;
     try std.testing.expect(try finishCancelledRequest(&server, &request));
     try std.testing.expectEqual(@as(usize, 0), queue.count());
+}
+
+test "shared benchmark responses bypass the backend and credit discarded uploads" {
+    const a = std.testing.allocator;
+    const Server = @import("proxy.zig").ProxyServer;
+    for ([_]u8{ 1, 2 }) |mode| {
+        var queue = try @import("event_queue.zig").Queue.init(a, 1);
+        defer queue.deinit();
+        var server: Server = .{ .allocator = a, .queue = &queue, .pending = .init(a), .listener = .{ .fd = -1, .port = 0 }, .port = 0, .benchmark_mode = mode, .backend_host = "invalid" };
+        defer server.pending.deinit();
+        const request = try a.create(Request);
+        request.* = .{ .allocator = a, .headers_ready = true, .uncredited_body = 3 };
+        defer request.deinit();
+        try request.body.appendSlice(a, "abc");
+        try progressRequest(a, &server, request);
+        try std.testing.expect(request.response_done and request.response.ready);
+        try std.testing.expectEqual(@as(usize, 3), request.consumed_body);
+        try std.testing.expectEqual(@as(usize, 0), request.body.items.len);
+        try std.testing.expect(request.backend == null and request.request_id == null);
+        const response_size = request.response.body.items.len;
+        // A later upload batch must release flow credit without duplicating output.
+        try request.body.appendSlice(a, "defg");
+        try progressRequest(a, &server, request);
+        try std.testing.expectEqual(@as(usize, 7), request.consumed_body);
+        try std.testing.expectEqual(response_size, request.response.body.items.len);
+        try std.testing.expectEqual(@as(u32, 0), server.pending.count());
+        try std.testing.expectEqual(@as(usize, 0), queue.count());
+    }
 }

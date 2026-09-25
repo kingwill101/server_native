@@ -90,6 +90,14 @@ pub fn serveConnection(
         .headers = headers.items,
     };
 
+    if (server.benchmark_mode != 0) {
+        var response: bridge_io.Response = .{};
+        defer response.deinit(allocator);
+        try bridge_io.benchmarkResponse(allocator, &response);
+        try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
+        return keep_alive;
+    }
+
     const request_id = server.next_request_id.fetchAdd(1, .monotonic);
     if (!server.registerRequest(request_id)) return error.RequestQueueClosed;
     defer server.discardRequest(request_id);
@@ -148,7 +156,9 @@ fn serveBridge(
     keep_alive: bool,
     upgrade: bool,
 ) !bool {
-    var backend = try server.connectBackend();
+    var backend = server.connectBackend() catch |err| {
+        return writeBridgeFailure(allocator, connection, "bridge call failed", err);
+    };
     defer backend.close();
 
     const start_len = try bridge_protocol.requestStartEncodedSize(head);
@@ -157,15 +167,30 @@ fn serveBridge(
     const request = try allocator.alloc(u8, start_len + 4 + body.len);
     defer allocator.free(request);
     _ = try bridge_protocol.encodeRequest(head, body, request);
-    try bridge_io.sendFrame(allocator, backend.fd, request);
+    bridge_io.sendFrame(allocator, backend.fd, request) catch |err| {
+        return writeBridgeFailure(allocator, connection, "bridge call failed", err);
+    };
 
     var response = bridge_io.Response{};
     defer response.deinit(allocator);
     var done = false;
     while (!done) {
-        const payload = try bridge_io.receiveFrame(allocator, backend.fd);
+        const payload = bridge_io.receiveFrame(allocator, backend.fd) catch |err| {
+            return writeBridgeFailure(allocator, connection, if (response.ready)
+                "bridge call failed before response end"
+            else
+                "bridge call failed: read frame header failed", err);
+        };
         defer allocator.free(payload);
-        try bridge_io.decodeResponseFrame(allocator, payload, &response, &done);
+        if (!response.ready and payload.len >= 2 and payload[0] == bridge_protocol.protocol_version) {
+            switch (payload[1]) {
+                2, 6, 12, 14 => {},
+                else => return writeBridgeFailure(allocator, connection, "bridge call failed: decode response failed: invalid bridge response frame type", error.InvalidResponse),
+            }
+        }
+        bridge_io.decodeResponseFrame(allocator, payload, &response, &done) catch |err| {
+            return writeBridgeFailure(allocator, connection, "bridge call failed: decode response failed", err);
+        };
         if (upgrade and response.status == 101 and (payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start) or payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start_tokenized))) {
             try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
             try runTunnel(allocator, server, backend.fd, connection);
@@ -180,6 +205,13 @@ fn serveBridge(
     try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
+}
+
+fn writeBridgeFailure(allocator: std.mem.Allocator, connection: *http1.Connection, context: []const u8, err: anyerror) !bool {
+    const message = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ context, @errorName(err) });
+    defer allocator.free(message);
+    try writeHttpResponse(allocator, connection, 502, &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }}, message, false);
+    return false;
 }
 
 fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u64, client: *http1.Connection) !void {

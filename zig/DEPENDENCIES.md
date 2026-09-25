@@ -347,5 +347,7 @@ Android and iOS retain Rust until their Zig ports are validated. Local source
 checkouts always compile current sources.
 
 Regenerate internal ABI bindings with `python3 tool/generate_zig_bindings.py`.
-It derives signatures from `src/lib.zig` and invokes the toolchain generator;
-protocol C headers are not needed for ABI discovery.
+It derives signatures from `src/lib.zig` and invokes the commit-pinned Zig 0.16
+generator in `tool/zig_bindings`; protocol C headers are not needed for ABI
+discovery. The private generator dependency is separate from the hosted build
+dependency used by package consumers.

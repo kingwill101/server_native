@@ -65,7 +65,7 @@ pub fn decodeResponseFrame(
         2, 12 => {
             var offset: usize = 2;
             response.ready = true;
-            response.status = try readU16(frame, &offset);
+            response.status = normalizeStatus(try readU16(frame, &offset));
             try decodeHeaders(allocator, frame, &offset, &response.headers);
             try response.body.appendSlice(allocator, try readBytes(frame, &offset));
             if (offset != frame.len) return error.InvalidResponse;
@@ -74,7 +74,7 @@ pub fn decodeResponseFrame(
         6, 14 => {
             var offset: usize = 2;
             response.ready = true;
-            response.status = try readU16(frame, &offset);
+            response.status = normalizeStatus(try readU16(frame, &offset));
             try decodeHeaders(allocator, frame, &offset, &response.headers);
             if (offset != frame.len) return error.InvalidResponse;
         },
@@ -89,6 +89,27 @@ pub fn decodeResponseFrame(
         },
         else => return error.InvalidResponse,
     }
+}
+
+// Match http::StatusCode used by the Rust bridge, including extension statuses.
+fn normalizeStatus(status: u16) u16 {
+    return if (status >= 100 and status <= 999) status else 502;
+}
+
+/// Both existing native benchmark modes use this same finite JSON response.
+/// The caller must invoke this only once for a fresh response.
+pub fn benchmarkResponse(allocator: std.mem.Allocator, response: *Response) !void {
+    const name = try allocator.dupe(u8, "content-type");
+    errdefer allocator.free(name);
+    const value = try allocator.dupe(u8, "application/json");
+    errdefer allocator.free(value);
+    // Reserve the header before committing its owned fields, so failures in the
+    // body allocation cannot leave dangling header strings in the response.
+    try response.headers.ensureUnusedCapacity(allocator, 1);
+    try response.body.appendSlice(allocator, "{\"ok\":true,\"label\":\"server_native_direct\"}");
+    response.headers.appendAssumeCapacity(.{ .name = name, .value = value });
+    response.status = 200;
+    response.ready = true;
 }
 
 fn receiveExact(fd: http1.Fd, output: []u8) !void {
@@ -252,4 +273,33 @@ test "bridge wire IO rejects truncated prefix payload and oversized lengths" {
         http1.shutdownWrite(fds[0]);
         try std.testing.expectError(if (i == 4) error.FrameTooLarge else error.ConnectionClosed, receiveFrame(std.testing.allocator, fds[1]));
     }
+}
+
+test "bridge response status normalization matches Rust for finite and streaming frames" {
+    for ([_]u16{ 0, 99, 100, 200, 599, 600, 999, 1000, 65535 }) |status| {
+        for ([_]u8{ 12, 14 }) |tag| {
+            var frame = [_]u8{ 1, tag, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            std.mem.writeInt(u16, frame[2..4], status, .big);
+            var response: Response = .{};
+            defer response.deinit(std.testing.allocator);
+            var done = false;
+            try decodeResponseFrame(std.testing.allocator, frame[0..(if (tag == 12) @as(usize, 12) else 8)], &response, &done);
+            try std.testing.expectEqual(@as(u16, if (status < 100 or status > 999) 502 else status), response.status);
+            try std.testing.expectEqual(tag == 12, done);
+        }
+    }
+}
+
+fn benchmarkAllocation(allocator: std.mem.Allocator) !void {
+    var response: Response = .{};
+    defer response.deinit(allocator);
+    try benchmarkResponse(allocator, &response);
+    try std.testing.expect(response.ready);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("application/json", response.headers.items[0].value);
+    try std.testing.expectEqualStrings("{\"ok\":true,\"label\":\"server_native_direct\"}", response.body.items);
+}
+
+test "native benchmark response has Rust parity and unwinds allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, benchmarkAllocation, .{});
 }

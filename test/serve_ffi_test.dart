@@ -279,9 +279,9 @@ Future<ProcessResult> _curlHttp3GetWithRetry(
 
 String _locateTlsAsset(String filename) {
   final candidates = <String>[
-    p.join('examples', 'http2', filename),
-    p.join('..', 'examples', 'http2', filename),
-    p.join('..', '..', 'examples', 'http2', filename),
+    p.join('example', 'http2', filename),
+    p.join('..', 'example', 'http2', filename),
+    p.join('..', '..', 'example', 'http2', filename),
   ];
   for (final candidate in candidates) {
     if (File(candidate).existsSync()) {
