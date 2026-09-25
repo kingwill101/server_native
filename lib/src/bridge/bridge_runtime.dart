@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-/// Bridge runtime primitives for routing requests between Rust transport
+/// Bridge runtime primitives for routing requests between Zig transport
 /// and Dart request handlers.
 ///
 /// {@template server_native_bridge_protocol_overview}

@@ -33,8 +33,6 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Get dependencies
         run: dart pub get

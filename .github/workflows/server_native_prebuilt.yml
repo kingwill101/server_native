@@ -15,207 +15,10 @@ permissions:
   contents: write
 
 env:
-  RUST_VERSION: "1.92.0"
   PREBUILT_PACKAGE: "server_native"
   PREBUILT_TAG_PREFIX: "server-native-prebuilt-v"
 
 jobs:
-  native:
-    name: "${{ matrix.os_label }}"
-    runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.allow_failure }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux
-          - runner: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
-            binary_name: libserver_native.so
-            os_label: linux-x64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-          - runner: ubuntu-latest
-            rust_target: aarch64-unknown-linux-gnu
-            binary_name: libserver_native.so
-            os_label: linux-arm64
-            use_cross: true
-            android_abi: ""
-            allow_failure: false
-
-          # macOS
-          - runner: macos-latest
-            rust_target: aarch64-apple-darwin
-            binary_name: libserver_native.dylib
-            os_label: macos-arm64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-          - runner: macos-latest
-            rust_target: x86_64-apple-darwin
-            binary_name: libserver_native.dylib
-            os_label: macos-x64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-
-          # Windows
-          - runner: windows-latest
-            rust_target: x86_64-pc-windows-msvc
-            binary_name: server_native.dll
-            os_label: windows-x64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-          - runner: windows-latest
-            rust_target: aarch64-pc-windows-msvc
-            binary_name: server_native.dll
-            os_label: windows-arm64
-            use_cross: false
-            android_abi: ""
-            allow_failure: true
-
-          # Android (cross-compiled from Linux with NDK)
-          - runner: ubuntu-latest
-            rust_target: aarch64-linux-android
-            binary_name: libserver_native.so
-            os_label: android-arm64
-            use_cross: false
-            android_abi: arm64-v8a
-            allow_failure: false
-          - runner: ubuntu-latest
-            rust_target: armv7-linux-androideabi
-            binary_name: libserver_native.so
-            os_label: android-armv7
-            use_cross: false
-            android_abi: armeabi-v7a
-            allow_failure: false
-          - runner: ubuntu-latest
-            rust_target: x86_64-linux-android
-            binary_name: libserver_native.so
-            os_label: android-x64
-            use_cross: false
-            android_abi: x86_64
-            allow_failure: false
-
-          # iOS static libraries
-          - runner: macos-latest
-            rust_target: aarch64-apple-ios
-            binary_name: libserver_native.a
-            os_label: ios-arm64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-          - runner: macos-latest
-            rust_target: aarch64-apple-ios-sim
-            binary_name: libserver_native.a
-            os_label: ios-sim-arm64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-          - runner: macos-latest
-            rust_target: x86_64-apple-ios
-            binary_name: libserver_native.a
-            os_label: ios-sim-x64
-            use_cross: false
-            android_abi: ""
-            allow_failure: false
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: ${{ matrix.rust_target }}
-
-      - name: Install cross
-        if: matrix.use_cross
-        shell: bash
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Install Android NDK
-        if: matrix.android_abi != ''
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r27c
-
-      - name: Install cargo-ndk
-        if: matrix.android_abi != ''
-        shell: bash
-        run: cargo install cargo-ndk
-
-      - name: Build server_native native library
-        working-directory: native
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if [ -n "${{ matrix.android_abi }}" ]; then
-            cargo ndk -t ${{ matrix.android_abi }} build --release
-          elif [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.rust_target }}
-          else
-            cargo build --release --target ${{ matrix.rust_target }}
-          fi
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-
-      - name: Locate artifact
-        id: locate
-        working-directory: native
-        shell: bash
-        run: |
-          set -euxo pipefail
-          base="target/${{ matrix.rust_target }}/release"
-          artifact_path="$base/${{ matrix.binary_name }}"
-          if [ ! -f "$artifact_path" ]; then
-            artifact_path="$(find "$base" -maxdepth 3 -type f -name "${{ matrix.binary_name }}" | head -1 || true)"
-          fi
-          if [ -z "$artifact_path" ] || [ ! -f "$artifact_path" ]; then
-            echo "::error::Could not find ${{ matrix.binary_name }} under $base"
-            find "$base" -maxdepth 4 -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.a' \) || true
-            exit 1
-          fi
-          echo "path=$artifact_path" >> "$GITHUB_OUTPUT"
-          ls -lh "$artifact_path"
-
-      - name: Strip artifact
-        working-directory: native
-        shell: bash
-        run: |
-          set -euxo pipefail
-          artifact="${{ steps.locate.outputs.path }}"
-          if command -v llvm-strip >/dev/null 2>&1; then
-            llvm-strip -g "$artifact" || true
-            llvm-strip -S "$artifact" || true
-            llvm-strip -x "$artifact" || true
-          elif command -v strip >/dev/null 2>&1; then
-            strip -g "$artifact" || true
-            strip -S "$artifact" || true
-            strip -x "$artifact" || true
-          else
-            echo "No strip tool found; leaving artifact unstripped"
-          fi
-          ls -lh "$artifact"
-
-      - name: Package artifact
-        shell: bash
-        run: |
-          set -euxo pipefail
-          target_dir="native/prebuilt/${{ matrix.os_label }}"
-          mkdir -p "$target_dir"
-          cp "native/${{ steps.locate.outputs.path }}" "$target_dir/${{ matrix.binary_name }}"
-          ls -lh "$target_dir/${{ matrix.binary_name }}"
-          tar czf "${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}.tar.gz" -C "$target_dir" "${{ matrix.binary_name }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}
-          path: ${{ env.PREBUILT_PACKAGE }}-${{ matrix.os_label }}.tar.gz
-
   zig-native:
     name: Zig ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
@@ -233,7 +36,6 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
-      - uses: dtolnay/rust-toolchain@stable
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -252,8 +54,6 @@ jobs:
           echo "AIOQUIC_PYTHON=$RUNNER_TEMP/aioquic/bin/python" >> "$GITHUB_ENV"
 
       - name: Validate Zig Dart integration on its native architecture
-        env:
-          SERVER_NATIVE_BACKEND: zig
         run: |
           dart test test/bridge_concurrency_test.dart test/sdk_http_server_compat_test.dart test/serve_ffi_http_test.dart test/serve_ffi_direct_test.dart test/zig_dart_api_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart test/http3_shared_test.dart test/http3_backpressure_test.dart test/http3_shutdown_test.dart
           dart test test/http3_runtime_test.dart -n 'aioquic|streaming|loss|address-validation|rebinding|drain-replay'
@@ -327,7 +127,7 @@ jobs:
   release:
     name: Create Release
     if: startsWith(github.ref, 'refs/tags/server-native-prebuilt-v') || github.event_name == 'workflow_dispatch'
-    needs: [native, zig-package]
+    needs: [zig-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

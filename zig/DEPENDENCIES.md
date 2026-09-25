@@ -55,8 +55,7 @@ normal build. Linux x86_64 builds and runtime tests pass; Linux ARM64 also cross
 ReleaseSafe and has a native-architecture runtime matrix in release CI. Native ARM64 execution remains pending. The
 configured Zig artifact set is limited to Linux x86_64 and ARM64:
 the current POSIX listener and BoringSSL wrapper do not provide supported Zig
-artifacts for macOS, Windows, Android, or iOS. Those platforms continue to use
-the unchanged Rust artifact set until a separate Zig port is validated. Keep
+artifacts for macOS, Windows, Android, or iOS. Those platforms are unsupported until their Zig ports are validated. Keep
 each library's license with redistributed source or binary artifacts.
 
 ## Internal Zig adapters
@@ -173,7 +172,7 @@ transitions. Registering a port also wakes it if work is already queued. Dart
 uses that notification to drain FFI frames in batches of up to 64 before yielding,
 and waits on the port when idle. The port carries no request bodies. Shutdown
 detaches the notifier before stopping the native producer and closing the port.
-Rust retains its existing polling fallback.
+Zig is the sole runtime.
 
 `test/http2_concurrency_test.dart` holds a Dart handler open while checking a
 second stream, PING, cancellation, and a late response in bridge/direct modes
@@ -343,7 +342,7 @@ then packages both platform directories with `native_prebuilt --strict` into a
 combined manifest. It also runs `manifest verify-release` against the local
 archives before uploading artifacts. Native ARM64 workflow execution and
 published-archive consumer validation remain open gates. macOS, Windows,
-Android and iOS retain Rust until their Zig ports are validated. Local source
+Android and iOS are unsupported until their Zig ports are validated. Local source
 checkouts always compile current sources.
 
 Regenerate internal ABI bindings with `python3 tool/generate_zig_bindings.py`.

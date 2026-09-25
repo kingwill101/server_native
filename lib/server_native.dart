@@ -1,6 +1,6 @@
 library;
 
-/// Native Rust-backed HTTP server APIs for Dart.
+/// Native Zig-backed HTTP server APIs for Dart.
 ///
 /// This library is the public entrypoint for `server_native`.
 /// It is intended to be a drop-in server bootstrap replacement for

@@ -37,8 +37,6 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install static curl with HTTP/3 support
         run: |
@@ -61,10 +59,9 @@ jobs:
       - name: Get dependencies
         run: dart pub get
 
-      - name: Run native QUIC smoke tests
-        run: |
-          cargo test --manifest-path native/Cargo.toml \
-            --test h3_endpoint_smoke
+      - name: Run native Zig tests
+        working-directory: zig
+        run: zig build test
 
       - name: Run server_native HTTP/3 integration test
         working-directory: .
@@ -79,13 +76,10 @@ jobs:
           echo "AIOQUIC_PYTHON=$RUNNER_TEMP/aioquic/bin/python" >> "$GITHUB_ENV"
 
       - name: Run Zig HTTP/3 interoperability and streaming gates
-        env:
-          SERVER_NATIVE_BACKEND: zig
         run: dart test test/http3_runtime_test.dart test/http3_shutdown_test.dart test/http3_backpressure_test.dart test/http3_ipv6_test.dart test/http3_shared_test.dart test/udp_binding_probe_test.dart
 
       - name: Run isolated HTTP/3 lifecycle resource gate
         env:
-          SERVER_NATIVE_BACKEND: zig
           HTTP3_STRESS_ROUNDS: 64
           HTTP3_STRESS_MAX_RSS_GROWTH_MB: 32
         run: dart test test/http3_lifecycle_stress_test.dart --concurrency=1

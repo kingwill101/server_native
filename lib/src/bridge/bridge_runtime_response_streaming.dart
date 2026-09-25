@@ -21,6 +21,7 @@ final class BridgeStreamingHttpResponse implements HttpResponse {
   BridgeDetachedSocket? _detachedSocket;
   Future<void> _pendingWrite = Future<void>.value();
   bool _closed = false;
+  bool _requestAllowsKeepAlive = true;
   bool _started = false;
   bool _detachedWriteHeaders = true;
   Encoding _encoding = latin1;
@@ -101,7 +102,7 @@ final class BridgeStreamingHttpResponse implements HttpResponse {
   @override
   Future<void> addStream(Stream<List<int>> stream) async {
     _ensureOpen();
-    // Emit response start as soon as body streaming begins so the Rust side
+    // Emit response start as soon as body streaming begins so the Zig side
     // can flush status/headers even if first body chunk arrives later.
     _enqueueWrite(() async {
       await _ensureStarted();
@@ -204,41 +205,22 @@ final class BridgeStreamingHttpResponse implements HttpResponse {
     if (_detachedWriteHeaders) {
       await _ensureStarted();
     } else {
-      final manualDetachedStart = _emitManualDetachedStart(detached);
-      unawaited(
-        manualDetachedStart
-            .then((_) {
-              if (!_done.isCompleted) {
-                _done.complete();
-              }
-            })
-            .catchError((error, stack) {
-              if (!_done.isCompleted) {
-                _done.completeError(error, stack);
-              }
-            }),
+      detached.raw = true;
+      await onStart(
+        BridgeResponseFrame(
+          status: HttpStatus.switchingProtocols,
+          headers: const [],
+          bodyBytes: Uint8List(0),
+          detachedSocket: detached,
+        ),
       );
+      _started = true;
     }
     _closed = true;
-    if (_detachedWriteHeaders && !_done.isCompleted) {
+    if (!_done.isCompleted) {
       _done.complete();
     }
     return detached.applicationSocket;
-  }
-
-  Future<void> _emitManualDetachedStart(BridgeDetachedSocket detached) async {
-    final preface = await _readDetachedHttpResponsePreface(detached);
-    detached.stashPrefetchedTunnelBytes(preface.trailingBytes);
-    _started = true;
-    await onStart(
-      BridgeResponseFrame.fromHeaderPairs(
-        status: preface.status,
-        headerNames: preface.headerNames,
-        headerValues: preface.headerValues,
-        bodyBytes: Uint8List(0),
-        detachedSocket: detached,
-      ),
-    );
   }
 
   Future<void> _ensureStarted() async {
@@ -246,6 +228,11 @@ final class BridgeStreamingHttpResponse implements HttpResponse {
       return;
     }
     _started = true;
+    // Clearing response headers cannot reopen a nonpersistent request.
+    if (!_requestAllowsKeepAlive &&
+        statusCode != HttpStatus.switchingProtocols) {
+      headers.persistentConnection = false;
+    }
     _compressBody = _shouldCompressBody();
     if (_compressBody) {
       final compressionHeaders = headers;

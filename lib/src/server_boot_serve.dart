@@ -1,6 +1,6 @@
 part of 'server_boot.dart';
 
-/// Boots the Rust-native transport and dispatches `HttpRequest` objects to
+/// Boots the Zig-native transport and dispatches `HttpRequest` objects to
 /// [handler], similar to listening on `dart:io` `HttpServer`.
 ///
 /// {@macro server_native_serve_handler_example}
@@ -41,7 +41,7 @@ Future<void> serveNative(
   );
 }
 
-/// Boots the Rust-native TLS transport and dispatches `HttpRequest` objects to
+/// Boots the Zig-native TLS transport and dispatches `HttpRequest` objects to
 /// [handler], similar to listening on `dart:io` `HttpServer`.
 ///
 /// This requires PEM certificate and key files.
@@ -105,7 +105,7 @@ Future<void> serveSecureNative(
   );
 }
 
-/// Boots one logical handler across multiple Rust-native listeners.
+/// Boots one logical handler across multiple Zig-native listeners.
 ///
 /// Similar to `http_multi_server`, this runs one handler behind several bind
 /// addresses. The only per-listener difference is host/port binding.
@@ -175,7 +175,7 @@ Future<void> serveNativeMulti(
   await Future.wait(futures);
 }
 
-/// Boots one logical handler across multiple Rust-native TLS listeners.
+/// Boots one logical handler across multiple Zig-native TLS listeners.
 ///
 /// {@macro server_native_multi_bind_example}
 Future<void> serveSecureNativeMulti(
@@ -262,7 +262,7 @@ Future<void> serveSecureNativeMulti(
   await Future.wait(futures);
 }
 
-/// Boots the Rust-native transport and dispatches `HttpRequest` objects to
+/// Boots the Zig-native transport and dispatches `HttpRequest` objects to
 /// [handler], similar to listening on `dart:io` `HttpServer`.
 ///
 /// [nativeCallback] defaults to `true`, which bypasses the bridge socket and
@@ -308,7 +308,7 @@ Future<void> serveNativeHttp(
   );
 }
 
-/// Boots the Rust-native TLS transport and dispatches `HttpRequest` objects to
+/// Boots the Zig-native TLS transport and dispatches `HttpRequest` objects to
 /// [handler], similar to listening on `dart:io` `HttpServer`.
 ///
 /// [nativeCallback] defaults to `true`, which bypasses the bridge socket and
@@ -375,7 +375,7 @@ Future<void> serveSecureNativeHttp(
   );
 }
 
-/// Boots the Rust-native transport and dispatches requests directly to [handler]
+/// Boots the Zig-native transport and dispatches requests directly to [handler]
 /// without `HttpRequest`/`HttpResponse` wrapper allocation.
 ///
 /// {@macro server_native_direct_handler_example}
@@ -426,7 +426,7 @@ Future<void> serveNativeDirect(
   );
 }
 
-/// Boots the Rust-native TLS transport and dispatches requests directly to
+/// Boots the Zig-native TLS transport and dispatches requests directly to
 /// [handler] without `HttpRequest`/`HttpResponse` wrapper allocation.
 ///
 /// {@macro server_native_direct_handler_example}

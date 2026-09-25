@@ -100,7 +100,7 @@ pub fn Runtime(comptime Server: type) type {
         shutdown_started: bool = false,
         shutdown_deadline: u64 = 0,
 
-        pub fn create(server: *Server, cert: [:0]const u8, key: [:0]const u8, shared_listener: bool) !*Self {
+        pub fn create(server: *Server, cert: [:0]const u8, key: [:0]const u8, password: ?[:0]const u8, shared_listener: bool) !*Self {
             var local: c.sockaddr_storage = undefined;
             var len: c.socklen_t = @sizeOf(c.sockaddr_storage);
             if (c.getsockname(server.listener.fd, @ptrCast(&local), &len) != 0) return error.SocketFailed;
@@ -111,7 +111,7 @@ pub fn Runtime(comptime Server: type) type {
             }
             var tls = try h3.TlsContext.initServer();
             errdefer tls.deinit();
-            try tls.certificate(cert, key);
+            try tls.certificateWithPassword(cert, key, password);
             const self = try backing_allocator.create(Self);
             errdefer backing_allocator.destroy(self);
             // Registry -> group is the only lock order. The UDP worker only

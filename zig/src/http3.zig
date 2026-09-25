@@ -142,7 +142,13 @@ pub const TlsContext = struct {
     }
     /// Load a PEM chain and key, verifying they match before accepting sessions.
     pub fn certificate(self: *TlsContext, chain: [:0]const u8, key: [:0]const u8) Error!void {
+        return self.certificateWithPassword(chain, key, null);
+    }
+
+    pub fn certificateWithPassword(self: *TlsContext, chain: [:0]const u8, key: [:0]const u8, password: ?[:0]const u8) Error!void {
         const context = self.native orelse return error.Closed;
+        c.SSL_CTX_set_default_passwd_cb_userdata(context, if (password) |value| @ptrCast(@constCast(value.ptr)) else null);
+        defer c.SSL_CTX_set_default_passwd_cb_userdata(context, null);
         if (c.SSL_CTX_use_certificate_chain_file(context, chain.ptr) != 1 or c.SSL_CTX_use_PrivateKey_file(context, key.ptr, c.SSL_FILETYPE_PEM) != 1 or c.SSL_CTX_check_private_key(context) != 1) return error.NativeFailure;
     }
     /// The caller must attach ngtcp2_crypto_conn_ref via SSL_set_app_data before
@@ -575,4 +581,12 @@ test "HTTP3 control output is reoffered until QUIC accepts its bytes" {
     const partial = try conn.output(&vectors);
     try std.testing.expectEqual(stream, partial.stream);
     try std.testing.expectEqualSlices(u8, bytes[1..], partial.vectors[0].base[0..partial.vectors[0].len]);
+}
+
+test "HTTP3 TLS encrypted keys reject wrong passwords and clear borrowed data" {
+    var context = try TlsContext.initServer();
+    defer context.deinit();
+    try std.testing.expectError(error.NativeFailure, context.certificateWithPassword("../example/http2/cert.pem", "../example/http2/key_encrypted.pem", "wrong-pass"));
+    try context.certificateWithPassword("../example/http2/cert.pem", "../example/http2/key_encrypted.pem", "routed-test-pass");
+    try std.testing.expect(c.SSL_CTX_get_default_passwd_cb_userdata(context.native) == null);
 }

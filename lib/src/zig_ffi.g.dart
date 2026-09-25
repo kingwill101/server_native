@@ -19,6 +19,11 @@ external ffi.Pointer<ffi.Void> server_native_zig_start_proxy_server(
 );
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
+  symbol: 'server_native_zig_close_http',
+)
+external void server_native_zig_close_http(ffi.Pointer<ffi.Void> handle);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(
   symbol: 'server_native_zig_begin_shutdown',
 )
 external void server_native_zig_begin_shutdown(ffi.Pointer<ffi.Void> handle);

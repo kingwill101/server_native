@@ -15,6 +15,7 @@ final class BridgeHttpResponse implements HttpResponse {
   BridgeDetachedSocket? _detachedSocket;
   bool _detachedWriteHeaders = true;
   bool _closed = false;
+  bool _requestAllowsKeepAlive = true;
   Encoding _encoding = latin1;
   bool _encodingSet = false;
   int _bytesWritten = 0;
@@ -115,6 +116,10 @@ final class BridgeHttpResponse implements HttpResponse {
   Future<void> close() async {
     if (_closed) return;
     _validateContentLengthOnClose();
+    if (!_requestAllowsKeepAlive &&
+        statusCode != HttpStatus.switchingProtocols) {
+      headers.persistentConnection = false;
+    }
     _closed = true;
     if (!_done.isCompleted) {
       _done.complete();

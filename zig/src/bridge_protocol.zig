@@ -18,6 +18,8 @@ pub const FrameType = enum(u8) {
     response_tokenized = 12,
     request_start_tokenized = 13,
     response_start_tokenized = 14,
+    detach = 15,
+    detached_ready = 16,
 };
 
 pub const Error = error{

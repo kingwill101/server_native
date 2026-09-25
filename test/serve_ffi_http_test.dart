@@ -425,9 +425,9 @@ void main() {
           socket,
         ).timeout(const Duration(seconds: 3));
         expect(preface, startsWith('HTTP/1.1 101 Switching Protocols\r\n'));
-        expect(preface, contains('upgrade: websocket\r\n'));
-        expect(preface, contains('connection: Upgrade\r\n'));
-        expect(preface, contains('sec-websocket-accept: $accept\r\n'));
+        expect(preface, contains('Upgrade: websocket\r\n'));
+        expect(preface, contains('Connection: Upgrade\r\n'));
+        expect(preface, contains('Sec-WebSocket-Accept: $accept\r\n'));
       } finally {
         await socket.close();
       }

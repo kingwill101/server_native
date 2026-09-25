@@ -48,7 +48,8 @@ Future<void> main(List<String> args) async {
     'relic': const _FrameworkConfig(
       name: 'relic',
       gitUrl: 'https://github.com/serverpod/relic.git',
-      branch: 'main',
+      // Compatibility targets Relic 2.0 RC and later releases only.
+      branch: 'v2.0.0-rc.1',
       patchFile: 'relic.patch',
     ),
     'serinus': const _FrameworkConfig(
@@ -324,15 +325,16 @@ Future<void> _syncRepo({
     workingDirectory: checkoutDir.path,
     label: '${framework.name}: fetch',
   );
+  // FETCH_HEAD resolves both moving branches and release tags.
   await _runChecked(
     'git',
-    ['checkout', '-f', framework.branch],
+    ['checkout', '--detach', '-f', 'FETCH_HEAD'],
     workingDirectory: checkoutDir.path,
     label: '${framework.name}: checkout',
   );
   await _runChecked(
     'git',
-    ['reset', '--hard', 'origin/${framework.branch}'],
+    ['reset', '--hard', 'FETCH_HEAD'],
     workingDirectory: checkoutDir.path,
     label: '${framework.name}: reset',
   );

@@ -1,5 +1,4 @@
-# Separate Zig artifact manifest. Rust remains the public prebuilt default
-# until every target has an independently verified Zig build.
+# Zig runtime artifacts for the supported Linux targets.
 schema: 2
 package: server_native
 asset_name: src/zig_ffi.g.dart

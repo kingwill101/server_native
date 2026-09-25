@@ -65,12 +65,10 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build server_native native library (debug)
-        working-directory: native
-        run: cargo build
+      - name: Build server_native Zig library
+        working-directory: zig
+        run: zig build
 
       - name: Get server_native dependencies
         working-directory: .

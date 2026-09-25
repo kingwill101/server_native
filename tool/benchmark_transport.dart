@@ -182,7 +182,7 @@ final class _BenchmarkOptions {
       '  --pretty          Pretty-print JSON output (use with --json)',
     );
     stdout.writeln(
-      '  --include-native-direct-shape  Add rust-only direct-shape benchmark mode',
+      '  --include-native-direct-shape  Add native-only direct-shape benchmark mode',
     );
     stdout.writeln(
       '  --include-direct-native-callback  Add serveNativeDirect(nativeDirect:true) mode',
@@ -440,7 +440,7 @@ String _buildPrettyInterpretation(List<_BenchmarkResult> results) {
         continue;
       }
       lines.add(
-        '  - Additional rust-only baseline ${native.label}: ${renderStats(native)}',
+        '  - Additional native-only baseline ${native.label}: ${renderStats(native)}',
       );
     }
   }

@@ -7,6 +7,11 @@ part of 'server_boot.dart';
 final class _ProxyConnectionCounters {
   int _openSockets = 0;
   int _activeRequests = 0;
+  int _detached = 0;
+  void onDetached() => _detached++;
+  void onDetachedClosed() {
+    if (_detached > 0) _detached--;
+  }
 
   /// Records a newly accepted backend bridge socket.
   void onSocketOpened() {
@@ -38,9 +43,9 @@ final class _ProxyConnectionCounters {
   /// Returns a current [HttpConnectionsInfo] snapshot.
   HttpConnectionsInfo snapshot() {
     final info = HttpConnectionsInfo();
-    info.total = _openSockets;
-    info.active = _activeRequests;
-    info.idle = _openSockets - _activeRequests;
+    info.total = (_openSockets - _detached).clamp(0, _openSockets);
+    info.active = (_activeRequests - _detached).clamp(0, _activeRequests);
+    info.idle = (info.total - info.active).clamp(0, info.total);
     info.closing = 0;
     return info;
   }
@@ -52,7 +57,7 @@ final class _ProxyConnectionCounters {
   }
 }
 
-/// Binds the local bridge transport server used for Rust <-> Dart frames.
+/// Binds the local bridge transport server used for Zig <-> Dart frames.
 ///
 /// On Unix this prefers a Unix-domain socket, falling back to loopback TCP.
 /// On non-Unix hosts this always uses loopback TCP.
@@ -104,7 +109,7 @@ Future<_BridgeBinding> _bindBridgeServer() async {
   );
 }
 
-/// Handles one accepted bridge socket from the native Rust transport.
+/// Handles one accepted bridge socket from the native Zig transport.
 ///
 /// This function decodes request frames, dispatches to Dart handlers, encodes
 /// response frames, and runs tunnel mode for upgraded/detached sockets.

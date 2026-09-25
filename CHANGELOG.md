@@ -4,7 +4,9 @@ All notable changes to `server_native` will be documented in this file.
 
 ## Unreleased
 
-- Added a Zig Dart API-DL bridge smoke test while retaining Rust as the active HTTP transport.
+- Removed the Rust runtime, Cargo build, bindings and release artifacts. Zig is
+  now the sole backend, supporting Linux x64 and ARM64.
+- Added Dart API-DL notification and native lifecycle support.
 - Added a bounded, thread-safe Zig event queue with copied payload ownership, backpressure, and Dart API-DL delivery.
 
 - Added verified prebuilt-native metadata and streamlined native asset

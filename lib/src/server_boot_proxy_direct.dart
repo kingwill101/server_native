@@ -13,6 +13,7 @@ final class _NativeDirectRequestStreamState {
   int responseStatusCode = HttpStatus.ok;
   bool detachedSocketUsesTunnel = false;
   final tunnelInputClosed = Completer<void>();
+  final detachedReady = Completer<void>();
   final List<Uint8List> _pendingUnconsumedBodyChunks = <Uint8List>[];
   bool requestEnded = false;
   bool responseCompleted = false;
@@ -251,7 +252,22 @@ NativeProxyServer _startNativeDirectProxy({
                   frame.status == HttpStatus.switchingProtocols;
               streamState.detachedSocket = frame.detachedSocket;
               streamState.flushBufferedChunksToDetachedSocket();
-              await pushResponsePayload(frame.encodeStartPayload());
+              final detached = frame.detachedSocket;
+              if (detached != null) {
+                final accepted = await proxyRef.pushDirectResponseFrameAsync(
+                  requestId,
+                  detached.detachFrame(),
+                );
+                if (!accepted) {
+                  throw StateError('Native request closed before detachment');
+                }
+                await streamState.detachedReady.future.timeout(
+                  const Duration(seconds: 5),
+                );
+              }
+              if (detached?.raw != true) {
+                await pushResponsePayload(frame.encodeStartPayload());
+              }
               startDetachedForwardingIfNeeded();
             },
             onResponseChunk: (chunkBytes) async {
@@ -331,6 +347,12 @@ NativeProxyServer _startNativeDirectProxy({
 
     final streamState = nativeDirectStreams[requestId];
     if (streamState != null) {
+      if (BridgeDetachedSocket.isReady(requestPayload)) {
+        if (!streamState.detachedReady.isCompleted) {
+          streamState.detachedReady.complete();
+        }
+        return;
+      }
       if (BridgeRequestFrame.isChunkPayload(requestPayload)) {
         try {
           final chunk = BridgeRequestFrame.decodeChunkPayload(requestPayload);
@@ -404,7 +426,22 @@ NativeProxyServer _startNativeDirectProxy({
             return;
           }
           if (chunkBytes.isNotEmpty) {
-            detachedSocket.bridgeSocket.add(chunkBytes);
+            try {
+              detachedSocket.bridgeSocket.add(chunkBytes);
+            } on SocketException {
+              // A native frame can arrive after the detached peer has closed.
+              // Finish this request without terminating the shared drain loop.
+              unawaited(
+                removeNativeDirectStream(
+                  streamState: streamState,
+                  closeDetachedSocket: true,
+                  closeTrackedRequest: true,
+                ),
+              );
+              if (!streamState.tunnelInputClosed.isCompleted) {
+                streamState.tunnelInputClosed.complete();
+              }
+            }
           }
           return;
         }

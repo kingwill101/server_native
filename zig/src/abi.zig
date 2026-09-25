@@ -9,7 +9,7 @@ pub const ServerNativeProxyConfig = c.ServerNativeProxyConfig;
 
 /// Compile-time ABI checks shared by the Rust and Zig native assets.
 ///
-/// The field order mirrors `native/bindings.h`. The exact size is target
+/// The field order mirrors `zig/include/server_native_abi.h`. The exact size is target
 /// dependent, so the check compares the C-imported declaration with itself and
 /// keeps all exported Zig functions on that declaration rather than a second
 /// hand-written layout.

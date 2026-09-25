@@ -15,22 +15,9 @@ import 'package:server_native/src/generated/prebuilt_release.g.dart';
 const _repo = 'kingwill101/routed';
 const _latestTagAlias = 'latest';
 const _prebuiltTagPrefix = 'server-native-prebuilt-v';
-const _artifactPrefix = 'server_native';
+const _artifactPrefix = 'server_native-zig';
 const _projectPrebuiltRoot = '.dart_tool/server_native/prebuilt';
-const _supportedPlatforms = <String>{
-  'linux-x64',
-  'linux-arm64',
-  'macos-arm64',
-  'macos-x64',
-  'windows-x64',
-  'windows-arm64',
-  'android-arm64',
-  'android-armv7',
-  'android-x64',
-  'ios-arm64',
-  'ios-sim-arm64',
-  'ios-sim-x64',
-};
+const _supportedPlatforms = <String>{'linux-x64', 'linux-arm64'};
 
 Future<void> main(List<String> args) async {
   var tag = serverNativePrebuiltReleaseTag;

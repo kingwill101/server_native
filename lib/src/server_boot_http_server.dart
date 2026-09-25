@@ -20,7 +20,7 @@ final Map<int, Set<NativeHttpServer>> _nativeSharedServersByPort =
 /// `dart:io`-style HTTP server powered by the server_native transport.
 ///
 /// This class implements [HttpServer] so existing `HttpServer` request handling
-/// patterns can be reused with the Rust front transport.
+/// patterns can be reused with the Zig front transport.
 ///
 /// {@macro server_native_http_server_example}
 final class NativeHttpServer extends StreamView<HttpRequest>
@@ -348,11 +348,10 @@ final class NativeHttpServer extends StreamView<HttpRequest>
       await _waitForActiveRequestsToDrain();
     }
     await Future.wait(
-      _bindings.map((binding) => binding.running.close(force: force)),
-      eagerError: false,
-    );
-    await Future.wait(
-      _bindings.map((binding) => binding.running.done),
+      _bindings.map(
+        (binding) =>
+            binding.running.close(force: force, preserveDetached: true),
+      ),
       eagerError: false,
     );
     if (!_requestController.isClosed) {

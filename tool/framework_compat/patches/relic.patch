@@ -5,7 +5,7 @@ index e93b47e..04a50e2 100644
 @@ -1,6 +1,12 @@
  import 'dart:async';
  import 'dart:io' as io;
- 
+
 +import 'package:server_native/server_native.dart';
 +
 +const _serverNativeCompatEnv = 'SERVER_NATIVE_COMPAT';
@@ -52,8 +52,37 @@ index 81acd67..04954fd 100644
 @@ -19,6 +19,7 @@ dependencies:
    mime: ^2.0.0
    path: ^1.8.3
-   relic_core: ^1.1.0
+   relic_core: ^2.0.0-rc.1
 +  server_native: ^0.1.0
    stack_trace: ^1.10.0
    stream_channel: ^2.1.1
    web_socket: ^1.0.1
+diff --git a/packages/relic/test/relic_server_graceful_shutdown_test.dart b/packages/relic/test/relic_server_graceful_shutdown_test.dart
+index ec741a3..981d0e8 100644
+--- a/packages/relic/test/relic_server_graceful_shutdown_test.dart
++++ b/packages/relic/test/relic_server_graceful_shutdown_test.dart
+@@ -239,11 +239,9 @@ void main() {
+           server,
+         );
+
+-        // Force close the server while requests are in-flight
+-        await server.close(force: true);
+-
+-        // All requests should fail because connections were forcefully terminated
+-        await expectLater(
++        // Observe errors before shutdown: native aborts may complete the client
++        // futures before the asynchronous server.close() future completes.
++        final responsesFailed = expectLater(
+           responseFutures.wait,
+           throwsA(
+             isA<ParallelWaitError<List<http.Response?>, List<AsyncError?>>>()
+@@ -255,6 +253,9 @@ void main() {
+           ),
+         );
+
++        await server.close(force: true);
++        await responsesFailed;
++
+         // Complete the completer to clean up (even though it won't matter)
+         canComplete.complete();
+       },

@@ -25,6 +25,7 @@ Future<void> _handleChunkedBridgeRequest(
       wakeDemand();
     },
   );
+  final requestRead = Completer<void>();
   var requestBodyBytes = 0;
   var responseStarted = false;
   BridgeDetachedSocket? detachedSocket;
@@ -37,7 +38,21 @@ Future<void> _handleChunkedBridgeRequest(
     onResponseStart: (frame) async {
       responseStarted = true;
       detachedSocket = frame.detachedSocket;
-      writer.writeFrame(frame.encodeStartPayload());
+      final detached = frame.detachedSocket;
+      if (detached != null) {
+        await requestRead.future;
+        writer.writeFrame(detached.detachFrame());
+        await writer.flush();
+        final ready = await reader.readFrame(
+          timeout: const Duration(seconds: 5),
+        );
+        if (ready == null || !BridgeDetachedSocket.isReady(ready)) {
+          throw StateError(
+            'Native transport did not acknowledge socket detachment',
+          );
+        }
+      }
+      if (detached?.raw != true) writer.writeFrame(frame.encodeStartPayload());
       await writer.flush();
     },
     onResponseChunk: (chunkBytes) async {
@@ -146,6 +161,7 @@ Future<void> _handleChunkedBridgeRequest(
     }
   }
 
+  requestRead.complete();
   if (!requestBody.isClosed) {
     // A handler may respond without listening to the upload. Waiting for the
     // controller's done future would hold its response until a listener exists.

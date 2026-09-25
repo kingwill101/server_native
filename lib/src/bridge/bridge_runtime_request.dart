@@ -19,6 +19,12 @@ final class BridgeHttpRequest extends Stream<Uint8List> implements HttpRequest {
        _connectionInfo =
            connectionInfo ?? BridgeConnectionInfo.fromRequestFrame(frame) {
     response.persistentConnection = persistentConnection;
+    switch (response) {
+      case BridgeStreamingHttpResponse streaming:
+        streaming._requestAllowsKeepAlive = persistentConnection;
+      case BridgeHttpResponse buffered:
+        buffered._requestAllowsKeepAlive = persistentConnection;
+    }
   }
 
   _BridgeRequestHeaders? _headers;
@@ -41,7 +47,10 @@ final class BridgeHttpRequest extends Stream<Uint8List> implements HttpRequest {
   Uri? _requestedUri;
 
   @override
-  Uri get uri => requestedUri;
+  Uri get uri => _uri ??= Uri.parse(
+    _frame.query.isEmpty ? _frame.path : '${_frame.path}?${_frame.query}',
+  );
+  Uri? _uri;
 
   @override
   HttpHeaders get headers => _headers ??= _buildBridgeRequestHeaders(

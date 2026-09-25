@@ -9,19 +9,20 @@ final class _RunningProxy {
   _RunningProxy({
     required this.host,
     required this.port,
-    required Future<void> Function({bool force}) close,
+    required Future<void> Function({bool force, bool preserveDetached}) close,
     required this.done,
     required this.connectionsInfo,
   }) : _close = close;
 
   final String host;
   final int port;
-  final Future<void> Function({bool force}) _close;
+  final Future<void> Function({bool force, bool preserveDetached}) _close;
   final Future<void> done;
   final HttpConnectionsInfo Function() connectionsInfo;
 
   /// Requests proxy shutdown.
-  Future<void> close({bool force = false}) => _close(force: force);
+  Future<void> close({bool force = false, bool preserveDetached = false}) =>
+      _close(force: force, preserveDetached: preserveDetached);
 }
 
 /// Boots a native proxy and waits until it exits.
@@ -115,6 +116,36 @@ Future<_RunningProxy> _startNativeProxy({
     _nativeVerboseLog(_http3RequiresTlsLogMessage);
   }
 
+  final detachedSockets = <BridgeDetachedSocket>{};
+  var httpClosed = false;
+  Future<void> Function()? releaseWhenDetachedClosed;
+  Future<void> trackedStream({
+    required BridgeRequestFrame frame,
+    required Stream<Uint8List> bodyStream,
+    required Future<void> Function(BridgeResponseFrame) onResponseStart,
+    required Future<void> Function(Uint8List) onResponseChunk,
+    void Function(BridgeDetachedSocket)? onDetachedSocket,
+  }) => handleStream(
+    frame: frame,
+    bodyStream: bodyStream,
+    onResponseStart: onResponseStart,
+    onResponseChunk: onResponseChunk,
+    onDetachedSocket: (socket) {
+      detachedSockets.add(socket);
+      connectionCounters?.onDetached();
+      unawaited(
+        socket.forwardingDone.then((_) async {
+          detachedSockets.remove(socket);
+          connectionCounters?.onDetachedClosed();
+          if (httpClosed && detachedSockets.isEmpty) {
+            await releaseWhenDetachedClosed?.call();
+          }
+        }),
+      );
+      onDetachedSocket?.call(socket);
+    },
+  );
+
   _BridgeBinding? bridgeBinding;
   StreamSubscription<Socket>? bridgeSubscription;
   late final NativeProxyServer proxy;
@@ -139,7 +170,7 @@ Future<_RunningProxy> _startNativeProxy({
         tlsKeyPath: tlsKeyPath,
         tlsCertPassword: tlsCertPassword,
         directPayloadHandler: directPayloadHandler,
-        handleStream: handleStream,
+        handleStream: trackedStream,
         onSocketOpened: connectionCounters?.onSocketOpened,
         // Direct callback mode does not expose real socket lifecycle events.
         // Keep synthetic connection slots until shutdown so connectionsInfo()
@@ -160,7 +191,7 @@ Future<_RunningProxy> _startNativeProxy({
         _handleBridgeSocket(
           socket,
           handleFrame: handleFrame,
-          handleStream: handleStream,
+          handleStream: trackedStream,
           handlePayload: handlePayload,
           idleTimeoutProvider: idleTimeoutProvider,
           onRequestStarted: connectionCounters?.onRequestStarted,
@@ -212,7 +243,16 @@ Future<_RunningProxy> _startNativeProxy({
   var stopping = false;
 
   /// Attempts graceful shutdown across proxy and bridge resources.
-  Future<void> stopAll({bool force = false}) async {
+  Future<void> stopAll({
+    bool force = false,
+    bool preserveDetached = false,
+  }) async {
+    if (preserveDetached && detachedSockets.isNotEmpty) {
+      httpClosed = true;
+      await proxy.closeHttp();
+      if (detachedSockets.isEmpty) await stopAll(force: true);
+      return;
+    }
     if (done.isCompleted || stopping) return;
     stopping = true;
     forceExitTimer?.cancel();
@@ -241,6 +281,8 @@ Future<_RunningProxy> _startNativeProxy({
       done.complete();
     }
   }
+
+  releaseWhenDetachedClosed = () => stopAll(force: true);
 
   /// Maps process signals to conventional shell exit codes.
   int forcedExitCode(ProcessSignal signal) {
@@ -297,7 +339,8 @@ Future<_RunningProxy> _startNativeProxy({
   return _RunningProxy(
     host: host,
     port: proxy.port,
-    close: ({bool force = false}) => stopAll(force: force),
+    close: ({bool force = false, bool preserveDetached = false}) =>
+        stopAll(force: force, preserveDetached: preserveDetached),
     done: done.future,
     connectionsInfo: () =>
         connectionCounters?.snapshot() ?? HttpConnectionsInfo(),

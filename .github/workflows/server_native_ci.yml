@@ -33,8 +33,6 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Get package dependencies
         working-directory: .
@@ -44,34 +42,19 @@ jobs:
         working-directory: .
         run: dart analyze
 
-      - name: Run Rust tests (lib + integration)
-        working-directory: native
-        run: cargo test --all-targets
-
-      - name: Run Rust-default Dart tests
-        working-directory: .
-        env:
-          SERVER_NATIVE_BACKEND: rust
-        run: |
-          dart test test/serve_ffi_http_test.dart test/bridge_concurrency_test.dart
-          dart test test/native_proxy_failure_test.dart
-          dart test test/serve_ffi_test.dart -n "HTTP/2 prior|HTTP/3"
-
       - name: Run Zig backend parity tests
         working-directory: .
-        env:
-          SERVER_NATIVE_BACKEND: zig
         run: |
           dart test test/serve_ffi_http_test.dart test/bridge_concurrency_test.dart
-          dart test test/native_proxy_failure_test.dart
+          dart test test/native_proxy_failure_test.dart test/native_transport_contract_test.dart
           dart test test/zig_dart_api_test.dart
-          dart test test/sdk_http_server_compat_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart
+          dart test test/sdk_http_server_compat_test.dart test/sdk_http_server_edge_cases_test.dart test/sdk_http_server_fixtures_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart
 
       - name: Check generated FFI bindings are up to date
         working-directory: .
         run: |
           dart run tool/generate_ffi.dart
-          git diff --exit-code -- native/bindings.h lib/src/ffi.g.dart
+          git diff --exit-code -- lib/src/native/proxy_config.g.dart
 
       - name: Check generated prebuilt release metadata is up to date
         working-directory: .

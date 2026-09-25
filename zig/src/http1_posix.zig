@@ -4,6 +4,7 @@ const c = @cImport({
     @cInclude("arpa/inet.h");
     @cInclude("netdb.h");
     @cInclude("netinet/in.h");
+    @cInclude("netinet/tcp.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/types.h");
     @cInclude("sys/un.h");
@@ -12,6 +13,35 @@ const c = @cImport({
 });
 
 pub const Fd = c_int;
+
+/// A nonblocking, coalescing wake signal for a native poll loop.
+/// The reader owns draining; producers signal under the pending-request lock.
+pub const WakeSignal = struct {
+    reader: Fd,
+    writer: Fd,
+
+    pub fn init() !WakeSignal {
+        var fds: [2]c_int = undefined;
+        if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0, &fds) != 0) return error.WakeSignalFailed;
+        return .{ .reader = fds[0], .writer = fds[1] };
+    }
+
+    pub fn signal(self: *WakeSignal) void {
+        const byte = [_]u8{1};
+        // A full socket already represents a pending wakeup. Never block Dart.
+        _ = c.send(self.writer, &byte, 1, c.MSG_DONTWAIT | c.MSG_NOSIGNAL);
+    }
+
+    pub fn drain(reader: Fd) void {
+        var buffer: [256]u8 = undefined;
+        while (c.recv(reader, &buffer, buffer.len, c.MSG_DONTWAIT) > 0) {}
+    }
+
+    pub fn close(self: *WakeSignal) void {
+        _ = c.close(self.reader);
+        _ = c.close(self.writer);
+    }
+};
 
 pub const Listener = struct {
     fd: Fd,
@@ -30,6 +60,10 @@ pub const TlsContext = struct {
     ctx: *c.SSL_CTX,
 
     pub fn init(cert_path: []const u8, key_path: []const u8, enable_h2: bool) !TlsContext {
+        return initWithPassword(cert_path, key_path, enable_h2, null);
+    }
+
+    pub fn initWithPassword(cert_path: []const u8, key_path: []const u8, enable_h2: bool, password: ?[:0]const u8) !TlsContext {
         _ = c.OPENSSL_init_ssl(0, null);
         const ctx = c.SSL_CTX_new(c.TLS_server_method()) orelse return error.TlsContextFailed;
         errdefer c.SSL_CTX_free(ctx);
@@ -38,6 +72,8 @@ pub const TlsContext = struct {
         const key = try std.heap.c_allocator.dupeZ(u8, key_path);
         defer std.heap.c_allocator.free(key);
         if (c.SSL_CTX_use_certificate_chain_file(ctx, cert.ptr) != 1) return error.TlsCertificateFailed;
+        c.SSL_CTX_set_default_passwd_cb_userdata(ctx, if (password) |value| @ptrCast(@constCast(value.ptr)) else null);
+        defer c.SSL_CTX_set_default_passwd_cb_userdata(ctx, null);
         if (c.SSL_CTX_use_PrivateKey_file(ctx, key.ptr, c.SSL_FILETYPE_PEM) != 1) return error.TlsKeyFailed;
         if (c.SSL_CTX_check_private_key(ctx) != 1) return error.TlsKeyMismatch;
         if (enable_h2) c.SSL_CTX_set_alpn_select_cb(ctx, selectAlpn, null);
@@ -183,7 +219,14 @@ pub fn listen(
 pub fn accept(listener: Fd) !Connection {
     const fd = c.accept(listener, null, null);
     if (fd < 0) return error.AcceptFailed;
+    errdefer _ = c.close(fd);
+    try setTcpNoDelay(fd);
     return .{ .fd = fd };
+}
+
+fn setTcpNoDelay(fd: Fd) !void {
+    const enabled: c_int = 1;
+    if (c.setsockopt(fd, c.IPPROTO_TCP, c.TCP_NODELAY, &enabled, @sizeOf(c_int)) != 0) return error.SocketOptionFailed;
 }
 
 pub fn connectTcp(allocator: std.mem.Allocator, host: []const u8, port: u16) !Connection {
@@ -203,7 +246,13 @@ pub fn connectTcp(allocator: std.mem.Allocator, host: []const u8, port: u16) !Co
     while (current) |address| : (current = address.ai_next) {
         const fd = c.socket(address.ai_family, address.ai_socktype, address.ai_protocol);
         if (fd < 0) continue;
-        if (c.connect(fd, address.ai_addr, address.ai_addrlen) == 0) return .{ .fd = fd };
+        if (c.connect(fd, address.ai_addr, address.ai_addrlen) == 0) {
+            setTcpNoDelay(fd) catch {
+                _ = c.close(fd);
+                continue;
+            };
+            return .{ .fd = fd };
+        }
         _ = c.close(fd);
     }
     return error.BackendConnectFailed;
@@ -220,6 +269,11 @@ pub fn connectUnix(path: []const u8) !Connection {
     const length: c.socklen_t = @intCast(@offsetOf(c.struct_sockaddr_un, "sun_path") + path.len + 1);
     if (c.connect(fd, @ptrCast(&address), length) != 0) return error.BackendConnectFailed;
     return .{ .fd = fd };
+}
+
+/// Interrupt blocked reads and writes while the owning worker retains close ownership.
+pub fn shutdownBoth(fd: Fd) void {
+    _ = c.shutdown(fd, c.SHUT_RDWR);
 }
 
 pub fn receive(connection: Fd, buffer: []u8) !usize {
@@ -327,6 +381,12 @@ test "TCP listener binds an ephemeral port and supports half-close response traf
     defer client.close();
     var peer = try accept(listener.fd);
     defer peer.close();
+    for ([_]Fd{ client.fd, peer.fd }) |fd| {
+        var enabled: c_int = 0;
+        var length: c.socklen_t = @sizeOf(c_int);
+        try std.testing.expectEqual(@as(c_int, 0), c.getsockopt(fd, c.IPPROTO_TCP, c.TCP_NODELAY, &enabled, &length));
+        try std.testing.expectEqual(@as(c_int, 1), enabled);
+    }
     var buffer: [16]u8 = undefined;
     try std.testing.expect((try receiveTimeoutConnection(&peer, &buffer, 0)) == null);
     try sendAllConnection(&client, "request");
@@ -413,4 +473,25 @@ test "HTTP1 TLS ALPN chooses h2 from an offer and rejects malformed lengths" {
     const http11 = "\x08http/1.1";
     try std.testing.expectEqual(c.SSL_TLSEXT_ERR_NOACK, TlsContext.selectAlpn(null, &selected, &length, http11, http11.len, null));
     try std.testing.expectError(error.TlsCertificateFailed, TlsContext.init("", "", true));
+}
+
+test "wake signals are nonblocking coalesce and return to idle after drain" {
+    var wake = try WakeSignal.init();
+    defer wake.close();
+    var pollfds = [_]std.posix.pollfd{.{ .fd = wake.reader, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pollfds, 0));
+    // Exceed socket buffering: signal must remain nonblocking when full.
+    for (0..100000) |_| wake.signal();
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&pollfds, 0));
+    WakeSignal.drain(wake.reader);
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pollfds, 0));
+    wake.signal();
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&pollfds, 0));
+}
+
+test "TLS encrypted key uses its password only during initialization" {
+    try std.testing.expectError(error.TlsKeyFailed, TlsContext.initWithPassword("../example/http2/cert.pem", "../example/http2/key_encrypted.pem", false, "wrong-pass"));
+    var tls = try TlsContext.initWithPassword("../example/http2/cert.pem", "../example/http2/key_encrypted.pem", true, "routed-test-pass");
+    defer tls.deinit();
+    try std.testing.expect(c.SSL_CTX_get_default_passwd_cb_userdata(tls.ctx) == null);
 }

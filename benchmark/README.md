@@ -1,3 +1,8 @@
+# Current runtime: Zig only
+
+The harness uses Zig. Numerical snapshots below predate Rust removal and are
+historical Rust measurements, not current Zig performance claims.
+
 # Framework Benchmarks
 
 This directory holds framework-level transport benchmarks for `server_native`.
@@ -17,7 +22,7 @@ Current framework adapters:
 - `routed`
 - `relic`
 - `shelf`
-- `native_direct` (Rust static direct path, non-framework)
+- `native_direct` (Zig static direct path, non-framework)
 
 ## Run
 
@@ -55,7 +60,7 @@ dart run benchmark/framework_transport_benchmark.dart --json
 - `relic_native`
 - `shelf_io`
 - `shelf_native`
-- `native_direct_rust`
+- `native_direct_zig`
 
 The `*_native` cases use `NativeHttpServer` and can be toggled between
 native-callback and bridge-socket path via `--native-callback=...`.
@@ -63,13 +68,13 @@ native-callback and bridge-socket path via `--native-callback=...`.
 ## `--native-callback` Meaning
 
 - `--native-callback=true`:
-  Rust accepts the socket and invokes Dart request handling through the direct
+  Zig accepts the socket and invokes Dart request handling through the direct
   FFI callback path (bridge socket bypassed), while keeping
   `HttpRequest`/`HttpResponse` compatibility in `NativeHttpServer`.
 - `--native-callback=false`:
-  Rust and Dart communicate over the bridge socket/frame path before requests
+  Zig and Dart communicate over the bridge socket/frame path before requests
   are materialized as `HttpRequest`/`HttpResponse`.
-- `native_direct_rust` is a pure Rust static benchmark mode and does not use
+- `native_direct_zig` is a pure Zig static benchmark mode and does not use
   Dart `HttpRequest` handling, so this flag does not change its code path.
 
 ## Latest Results

@@ -1,3 +1,16 @@
+# Current scope: Zig-only runtime
+
+Rust was removed at the user's direction. Zig is the sole backend and builds
+without Cargo. Current targets are Linux x64 and ARM64. Continue compatibility
+validation against dart:io and Relic 2 RC or later. Cross-platform ports, published
+prebuilt validation, and remaining compatibility defects are still open; removal
+of Rust does not mark those gates complete.
+
+The migration checklist below is retained as historical context. Instructions
+about retaining Rust, selecting backends, or its promotion gate are superseded.
+
+---
+
 # Zig backend plan for `server_native`
 
 ## Context

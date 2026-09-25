@@ -1,0 +1,32 @@
+[
+  {
+    "name": "repeated headers and encoded URL",
+    "wire": "POST /a%20b?q=one&q=two HTTP/1.1\r\nHost: fixture.test\r\nX-Trace: first\r\nX-Trace: second\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+    "status": 200,
+    "body": "hello",
+    "target": "/a%20b?q=one&q=two",
+    "trace": [
+      "first",
+      "second"
+    ]
+  },
+  {
+    "name": "chunk extensions",
+    "wire": "POST /upload HTTP/1.1\r\nHost: fixture.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3;part=one\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+    "status": 200,
+    "body": "abcde",
+    "target": "/upload",
+    "trace": []
+  },
+  {
+    "name": "invalid transfer coding",
+    "wire": "POST / HTTP/1.1\r\nHost: fixture.test\r\nTransfer-Encoding: chunked, gzip\r\nConnection: close\r\n\r\n",
+    "status": 400,
+    "reject": true
+  },
+  {
+    "name": "fragment-bearing target",
+    "wire": "GET /path#fragment HTTP/1.1\r\nHost: fixture.test\r\nConnection: close\r\n\r\n",
+    "status": 400
+  }
+]

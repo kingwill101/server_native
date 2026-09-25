@@ -150,7 +150,14 @@ Future<_RunningFfiServer> _startSecureServer(
   );
 
   final baseUri = Uri.parse('https://127.0.0.1:$port');
-  await _waitUntilUp(baseUri.replace(path: '/'), allowBadCertificate: true);
+  // Observe startup errors immediately, while the reachability probe runs.
+  // Otherwise a fast native TLS failure becomes an unhandled Future error.
+  await Future.any<void>([
+    _waitUntilUp(baseUri.replace(path: '/'), allowBadCertificate: true),
+    serveFuture.then<void>(
+      (_) => throw StateError('Server stopped during startup'),
+    ),
+  ]);
 
   return _RunningFfiServer(
     baseUri: baseUri,

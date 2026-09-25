@@ -1,6 +1,6 @@
 part of 'bridge_runtime.dart';
 
-/// A binary bridge response frame passed from Dart handlers back to Rust.
+/// A binary bridge response frame passed from Dart handlers back to Zig.
 ///
 /// {@macro server_native_bridge_protocol_overview}
 ///

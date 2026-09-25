@@ -7,34 +7,32 @@
 [![server_native CI](https://github.com/kingwill101/server_native/actions/workflows/server_native_ci.yml/badge.svg?branch=main)](https://github.com/kingwill101/server_native/actions/workflows/server_native_ci.yml)
 [![framework compat](https://github.com/kingwill101/server_native/actions/workflows/server_native_framework_compat.yml/badge.svg?branch=main)](https://github.com/kingwill101/server_native/actions/workflows/server_native_framework_compat.yml)
 
-`server_native` provides a Rust-backed HTTP server runtime for Dart with a
+`server_native` provides a Zig-backed HTTP server runtime for Dart with a
 `dart:io`-like programming model.
 For most server code, it is intended to be a drop-in replacement for
 `HttpServer`: keep the same request/response handling and swap only the bind
 bootstrap.
 
-## Zig Migration Status
+## Native Runtime Status
 
-Rust remains the default transport. Select Zig with `SERVER_NATIVE_BACKEND=zig`
-or `--define=server_native.backend=zig` on Linux x64/ARM64. Linux x64 runtime
-gates pass; ARM64 cross-builds pass, with native ARM64 execution still pending.
-The compile-time `server_native.zig_default` switch defaults to false; setting it
-to true opts that application into Zig unless an explicit backend overrides it.
-Other targets use Rust until their Zig ports are validated.
+Zig is the sole native backend. No backend environment variable or compile-time
+switch is needed. Rust source, toolchain, bindings and release artifacts have
+been removed. Current supported targets are **Linux x64 and ARM64**; the old
+Rust-supported platforms are not supported by this version.
 
 Zig serves HTTP/1.1 with TLS, HTTP/2, and HTTP/3 through the existing Dart API.
-The Linux HTTP/3 streaming, shutdown, interoperability and resource gates pass.
-Cross-target validation and release promotion remain open. See
-[runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status).
+See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status) and
+[HttpServer compatibility findings](test/HTTP_SERVER_PARITY.md). Removing Rust
+does not mean every compatibility or release gate has passed.
 
-Linux x64 and ARM64 packaging is configured in `zig_prebuilt.yaml`. The checked-in
-Zig prebuilt manifest remains empty until the matching release assets are
-published and verified. Source builds remain available; Rust prebuilts are separate.
+Linux artifacts are configured in `zig_prebuilt.yaml`. The checked-in manifest
+is empty until matching release assets are published and verified. Source
+builds require Zig 0.16 on PATH; Cargo is not required.
 
 ## Table Of Contents
 
 - [Install](#install)
-- [Zig Migration Status](#zig-migration-status)
+- [Native Runtime Status](#native-runtime-status)
 - [Quick Start (`HttpServer` Style)](#quick-start-httpserver-style)
 - [Drop-In `HttpServer` Replacement](#drop-in-httpserver-replacement)
 - [Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)](#protocol-support-http11-http2-http3)
@@ -117,7 +115,7 @@ Future<void> main() async {
 
 ## Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)
 
-The protocol support below is still provided by the Rust transport.
+The protocol support below is provided by the Zig transport.
 
 - HTTP/1.1: supported for plaintext and TLS servers.
 - HTTP/2: controlled explicitly with `http2` (defaults to `true`).
@@ -402,7 +400,7 @@ Framework transport benchmarks live in `benchmark/`:
 dart run benchmark/framework_transport_benchmark.dart --framework=all
 ```
 
-Latest harness snapshot (February 19, 2026; `requests=2500`, `concurrency=64`,
+Historical Rust harness snapshot (not Zig results; February 19, 2026; `requests=2500`, `concurrency=64`,
 `warmup=300`, `iterations=25`):
 
 Note: these values were measured on a local development machine and are
@@ -414,7 +412,7 @@ Mode meaning in this table:
 - `nativeCallback=true`: `NativeHttpServer` uses direct FFI callback handling
   (bridge socket bypassed).
 - `nativeCallback=false`: `NativeHttpServer` uses the bridge socket/frame
-  transport between Rust and Dart.
+  transport between Zig and Dart.
 
 | Mode | Top result | req/s | p95 |
 | --- | --- | ---: | ---: |
@@ -441,10 +439,14 @@ transport modes:
 - `SERVER_NATIVE_COMPAT=false` (`io`): framework binds with `dart:io` `HttpServer`
 - `SERVER_NATIVE_COMPAT=true` (`native`): framework binds with `NativeHttpServer`
 
+Relic compatibility targets **2.0.0-rc.1 and newer releases**. The harness
+pins `v2.0.0-rc.1` for reproducibility; Relic 1.x is outside the supported
+compatibility matrix.
+
 Run locally from repo root:
 
 ```bash
-dart run packages/server_native/tool/framework_compat.dart \
+dart run tool/framework_compat.dart \
   --framework=all \
   --mode=both \
   --fresh \
@@ -454,7 +456,7 @@ dart run packages/server_native/tool/framework_compat.dart \
 Run a single framework:
 
 ```bash
-dart run packages/server_native/tool/framework_compat.dart --framework=shelf --mode=both --fresh
+dart run tool/framework_compat.dart --framework=shelf --mode=both --fresh
 ```
 
 CI workflow:
@@ -490,79 +492,34 @@ up-to-date checklist for remaining `HttpServer` parity work.
 
 ## Native Bindings
 
-If you changed Rust FFI symbols/structs, regenerate bindings:
+Generate exported Zig bindings and the C configuration layout with:
 
 ```bash
+python3 tool/generate_zig_bindings.py
 dart run tool/generate_ffi.dart
 ```
 
-Prebuilt metadata is managed by `native_prebuilt.yaml` and a generated
-manifest. Refresh it after publishing a new native release with:
-
-```bash
-dart run native_prebuilt manifest update \
-  --config native_prebuilt.yaml \
-  --output <generated-manifest>
-```
+The configuration source is `zig/include/server_native_abi.h`; neither generator
+requires Cargo or cbindgen.
 
 ## Prebuilt Native Artifacts
 
-Cross-platform artifacts are built by:
-
-- `.github/workflows/server_native_prebuilt.yml`
-
-CI build output is staged under:
-
-- `packages/server_native/native/prebuilt/<platform>/`
-
-Artifact naming:
-
-- `server_native-<platform>.tar.gz`
-
-Prebuilt binary release tags are separate from Dart package releases:
-
-- `server-native-prebuilt-v*`
-
-Current platform labels:
-
-- `linux-x64`, `linux-arm64`
-- `macos-arm64`, `macos-x64`
-- `windows-x64`, `windows-arm64`
-- `android-arm64`, `android-armv7`, `android-x64`
-- `ios-arm64`, `ios-sim-arm64`, `ios-sim-x64`
-
-Pull host prebuilts into your project:
+`.github/workflows/server_native_prebuilt.yml` builds and tests Linux x64 and
+ARM64 artifacts on their native architectures. Archives are named
+`server_native-zig-<platform>.tar.gz`, with `server-native-prebuilt-v*` release tags.
+Only verified Zig assets belong in the generated manifest:
 
 ```bash
-dart run server_native:setup
+dart run native_prebuilt manifest update \
+  --config zig_prebuilt.yaml \
+  --output lib/src/generated/server_native_zig_prebuilts.g.dart
 ```
 
-`setup` is optional. The `native_prebuilt` hook resolves the verified manifest
-artifact from its shared cache (or downloads it) before falling back to a local
-Rust build. Workspace checkouts intentionally use the current Rust sources.
-
-To auto-select the newest available prebuilt release instead, use:
-
-```bash
-dart run server_native:setup --tag latest
-```
-
-Pull a specific release tag and platform:
-
-```bash
-dart run server_native:setup --tag server-native-prebuilt-v0.1.2 --platform linux-x64
-```
-
-Downloaded files are extracted to:
-
-- `.dart_tool/server_native/prebuilt/<tag>/<platform>/`
-
-`native_prebuilt` resolution order:
-
-1. `hooks.user_defines` `prebuilt_path` override
-2. Local `.prebuilt/<platform>/` artifact
-3. Verified shared cache/download from the manifest release
-4. Rust source fallback through `native_toolchain_rust`
+The build hook prefers verified release/cache artifacts for published packages
+and falls back to Zig source compilation. Workspace checkouts build current
+sources. The optional `dart run server_native:setup` utility downloads Zig
+archives for Linux x64 or ARM64 into
+`.dart_tool/server_native/prebuilt/<tag>/<platform>/`.
 
 ## Troubleshooting
 

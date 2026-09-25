@@ -10,8 +10,15 @@ final class BridgeDetachedSocket {
   /// Socket handed to Dart upgrade APIs (`WebSocketTransformer.upgrade`).
   final Socket applicationSocket;
 
-  /// Peer socket retained by the bridge runtime for Rust tunnel forwarding.
+  /// Peer socket retained by the bridge runtime for Zig tunnel forwarding.
   final Socket bridgeSocket;
+
+  bool raw = false;
+  final Completer<void> _forwardingDone = Completer<void>();
+  Future<void> get forwardingDone => _forwardingDone.future;
+  Uint8List detachFrame() => Uint8List.fromList([1, 15, raw ? 1 : 0]);
+  static bool isReady(Uint8List frame) =>
+      frame.length == 2 && frame[0] == 1 && frame[1] == 16;
 
   Uint8List? _prefetchedTunnelBytes;
   StreamIterator<Uint8List>? _bridgeIterator;
@@ -48,6 +55,7 @@ final class BridgeDetachedSocket {
 
   /// Closes both ends of the detached socket pair, ignoring close races.
   Future<void> close() async {
+    if (!_forwardingDone.isCompleted) _forwardingDone.complete();
     final iterator = _bridgeIterator;
     _bridgeIterator = null;
     if (iterator != null) {
@@ -76,6 +84,14 @@ Future<BridgeDetachedSocket> _createDetachedSocketPair() async {
 
     final bridgeSocket = await bridgeSocketFuture;
     final applicationSocket = await applicationSocketFuture;
+    // This end is transport-owned. Read forwarding handles peer errors, but
+    // Socket.done can fail independently when a write races peer shutdown.
+    unawaited(
+      bridgeSocket.done.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace _) {},
+      ),
+    );
     try {
       bridgeSocket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {}

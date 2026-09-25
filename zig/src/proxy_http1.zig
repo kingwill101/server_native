@@ -32,7 +32,7 @@ pub fn serveConnection(
             header_end = index + 4;
             const header_bytes = input.items[0..index];
             content_length = parseContentLength(header_bytes) catch return error.InvalidContentLength;
-            chunked_body = hasChunkedEncoding(header_bytes);
+            chunked_body = try parseTransferEncoding(header_bytes);
             if (content_length > max_body_bytes) return error.BodyTooLarge;
         }
     }
@@ -60,7 +60,8 @@ pub fn serveConnection(
     const method = request_line[0..first_space];
     const target = request_line[first_space + 1 .. second_space];
     const protocol = request_line[second_space + 1 ..];
-    if (!std.mem.startsWith(u8, protocol, "HTTP/")) return error.InvalidRequest;
+    if (!std.mem.eql(u8, protocol, "HTTP/1.0") and !std.mem.eql(u8, protocol, "HTTP/1.1")) return error.InvalidRequest;
+    if (std.mem.indexOfScalar(u8, target, '#') != null) return error.InvalidRequestTarget;
 
     var headers: std.ArrayList(bridge_protocol.Header) = .empty;
     defer headers.deinit(request_allocator);
@@ -86,7 +87,7 @@ pub fn serveConnection(
         .authority = authority,
         .path = if (path.len == 0) "/" else path,
         .query = query,
-        .protocol = protocol,
+        .protocol = protocol[5..],
         .headers = headers.items,
     };
 
@@ -134,6 +135,15 @@ pub fn serveConnection(
             continue;
         };
         defer allocator.free(frame);
+        if (frame.len == 3 and frame[0] == 1 and frame[1] == 15) {
+            try server.detachConnection(connection.fd);
+            try server.queue.push(@bitCast(request_id), &.{ 1, 16 });
+            if (frame[2] == 1) {
+                try runDirectTunnel(allocator, server, request_id, connection);
+                return false;
+            }
+            continue;
+        }
         try bridge_io.decodeResponseFrame(allocator, frame, &response, &response_done);
         if (upgrade and response.status == 101) {
             try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
@@ -141,7 +151,7 @@ pub fn serveConnection(
             return false;
         }
     }
-    if (!response_done) return error.ResponseUnavailable;
+    if (!response_done or server.stopped.load(.acquire)) return false;
     try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
@@ -159,17 +169,24 @@ fn serveBridge(
     var backend = server.connectBackend() catch |err| {
         return writeBridgeFailure(allocator, connection, "bridge call failed", err);
     };
-    defer backend.close();
+    if (!server.trackConnection(backend.fd)) {
+        backend.close();
+        return false;
+    }
+    defer server.closeConnection(&backend);
 
     const start_len = try bridge_protocol.requestStartEncodedSize(head);
-    // The request body is already buffered. A complete frame also allows
-    // upgrade handlers to detach without subscribing to a body stream.
-    const request = try allocator.alloc(u8, start_len + 4 + body.len);
+    const request = try allocator.alloc(u8, start_len);
     defer allocator.free(request);
-    _ = try bridge_protocol.encodeRequest(head, body, request);
-    bridge_io.sendFrame(allocator, backend.fd, request) catch |err| {
-        return writeBridgeFailure(allocator, connection, "bridge call failed", err);
-    };
+    _ = try bridge_protocol.encodeRequestStart(head, request);
+    try bridge_io.sendFrame(allocator, backend.fd, request);
+    if (body.len != 0) {
+        const chunk = try allocator.alloc(u8, 6 + body.len);
+        defer allocator.free(chunk);
+        _ = try bridge_protocol.encodeChunk(.request_chunk, body, chunk);
+        try bridge_io.sendFrame(allocator, backend.fd, chunk);
+    }
+    try bridge_io.sendFrame(allocator, backend.fd, &.{ 1, 5 });
 
     var response = bridge_io.Response{};
     defer response.deinit(allocator);
@@ -182,6 +199,16 @@ fn serveBridge(
                 "bridge call failed: read frame header failed", err);
         };
         defer allocator.free(payload);
+        if (payload.len == 3 and payload[0] == 1 and payload[1] == 15) {
+            try server.detachConnection(connection.fd);
+            try server.detachConnection(backend.fd);
+            try bridge_io.sendFrame(allocator, backend.fd, &.{ 1, 16 });
+            if (payload[2] == 1) {
+                try runTunnel(allocator, server, backend.fd, connection);
+                return false;
+            }
+            continue;
+        }
         if (!response.ready and payload.len >= 2 and payload[0] == bridge_protocol.protocol_version) {
             switch (payload[1]) {
                 2, 6, 12, 14 => {},
@@ -216,6 +243,7 @@ fn writeBridgeFailure(allocator: std.mem.Allocator, connection: *http1.Connectio
 
 fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u64, client: *http1.Connection) !void {
     const client_fd = client.fd;
+    const response_wake = try server.enableResponseWake(request_id);
     defer {
         var close_payload: [2]u8 = undefined;
         _ = bridge_protocol.encodeTerminal(.tunnel_close, &close_payload) catch unreachable;
@@ -238,11 +266,16 @@ fn runDirectTunnel(allocator: std.mem.Allocator, server: anytype, request_id: u6
             }
         }
         if (input_closed and output_closed) return;
-        if (input_closed) {
-            _ = try std.posix.poll(&.{}, 1);
+        const available = if (input_closed) null else try http1.receiveTimeoutConnection(client, &buffer, 0);
+        const count = available orelse {
+            var descriptors = [_]std.posix.pollfd{
+                .{ .fd = if (input_closed) -1 else client_fd, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = response_wake, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+            _ = try std.posix.poll(&descriptors, 100);
+            if (descriptors[1].revents & std.posix.POLL.IN != 0) http1.WakeSignal.drain(response_wake);
             continue;
-        }
-        const count = (try http1.receiveTimeoutConnection(client, &buffer, 10)) orelse continue;
+        };
         if (count == 0) {
             input_closed = true;
             var end: [2]u8 = undefined;
@@ -312,22 +345,26 @@ fn runTunnel(allocator: std.mem.Allocator, server: anytype, backend_fd: http1.Fd
     }
 }
 
-fn hasChunkedEncoding(headers: []const u8) bool {
+fn parseTransferEncoding(headers: []const u8) !bool {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     _ = lines.next();
+    var present = false;
+    var last: []const u8 = "";
     while (lines.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         if (asciiEqualIgnoreCase(line[0..colon], "transfer-encoding")) {
+            present = true;
             var tokens = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
-            var last: []const u8 = "";
             while (tokens.next()) |token| {
                 const normalized = trim(token);
                 if (normalized.len != 0) last = normalized;
             }
-            if (asciiEqualIgnoreCase(last, "chunked")) return true;
         }
     }
-    return false;
+    // Request framing is indeterminate unless the final coding is chunked.
+    // Consider all field lines, not merely the first one containing chunked.
+    if (present and !asciiEqualIgnoreCase(last, "chunked")) return error.InvalidTransferEncoding;
+    return present;
 }
 
 fn decodeChunkedBody(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
@@ -479,10 +516,10 @@ fn asciiEqualIgnoreCase(left: []const u8, right: []const u8) bool {
 }
 
 test "HTTP1 transfer encoding uses a case insensitive final coding" {
-    try std.testing.expect(hasChunkedEncoding("POST / HTTP/1.1\r\nTrAnSfEr-EnCoDiNg: gzip, CHUNKED\r\n"));
-    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n"));
-    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\n"));
-    try std.testing.expect(!hasChunkedEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n"));
+    try std.testing.expect(try parseTransferEncoding("POST / HTTP/1.1\r\nTrAnSfEr-EnCoDiNg: gzip, CHUNKED\r\n"));
+    try std.testing.expectError(error.InvalidTransferEncoding, parseTransferEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n"));
+    try std.testing.expect(!try parseTransferEncoding("GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\n"));
+    try std.testing.expectError(error.InvalidTransferEncoding, parseTransferEncoding("GET / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n"));
 }
 
 test "HTTP1 content length rejects invalid digits overflow and negative values" {
@@ -610,4 +647,19 @@ fn responseWriterAllocation(allocator: std.mem.Allocator) !void {
 
 test "HTTP1 response construction releases allocations on OOM and socket failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, responseWriterAllocation, .{});
+}
+
+test "HTTP1 framing rejects unknown empty and non-final transfer codings across field lines" {
+    for ([_][]const u8{
+        "Transfer-Encoding:",
+        "Transfer-Encoding: custom-encoding",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip",
+        "Transfer-Encoding: , ,",
+    }) |field| {
+        const headers = try std.fmt.allocPrint(std.testing.allocator, "POST / HTTP/1.1\r\n{s}\r\n", .{field});
+        defer std.testing.allocator.free(headers);
+        try std.testing.expectError(error.InvalidTransferEncoding, parseTransferEncoding(headers));
+    }
+    try std.testing.expect(try parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: , CHUNKED, \r\n"));
+    try std.testing.expect(!try parseTransferEncoding("GET / HTTP/1.1\r\nHost: test\r\n"));
 }

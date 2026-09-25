@@ -229,7 +229,7 @@ Map<String, _ServerFactory> _buildCases(_BenchmarkOptions options) {
         _startShelfNative(nativeCallback: options.nativeCallback);
   }
   if (includeNativeDirect) {
-    cases['native_direct_rust'] = _startNativeDirectRust;
+    cases['native_direct_zig'] = _startNativeDirectZig;
   }
   return cases;
 }
@@ -389,7 +389,7 @@ Future<_RunningServer> _startShelfNative({required bool nativeCallback}) async {
   );
 }
 
-Future<_RunningServer> _startNativeDirectRust() async {
+Future<_RunningServer> _startNativeDirectZig() async {
   final proxy = NativeProxyServer.start(
     host: InternetAddress.loopbackIPv4.address,
     port: 0,
