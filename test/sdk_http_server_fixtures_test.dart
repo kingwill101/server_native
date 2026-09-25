@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:server_native/server_native.dart';
 import 'package:test/test.dart';
@@ -124,6 +125,87 @@ void main() {
           expect(received, payload);
         },
       );
+      test('raw slow reader receives every byte when it resumes', () async {
+        final server = await _bind(mode);
+        final flooded = Completer<Socket>();
+        final chunk = Uint8List.fromList(
+          List<int>.generate(1024 * 1024, (i) => i % 251),
+        );
+        const count = 32;
+        server.listen((request) async {
+          final socket = await request.response.detachSocket(
+            writeHeaders: false,
+          );
+          for (var i = 0; i < count; i++) {
+            socket.add(chunk);
+          }
+          flooded.complete(socket);
+          await socket.close();
+        });
+        final client = await Socket.connect('127.0.0.1', server.port);
+        addTearDown(() async {
+          client.destroy();
+          await server.close(force: true);
+        });
+        client.write('GET /resume HTTP/1.1\r\nHost: fixture.test\r\n\r\n');
+        final socket = await flooded.future.timeout(const Duration(seconds: 3));
+        addTearDown(socket.destroy);
+        // The application has queued the entire payload before the peer reads.
+        var received = 0;
+        await (() async {
+          await for (final bytes in client) {
+            for (final byte in bytes) {
+              if (byte != chunk[received % chunk.length]) {
+                fail('Corrupt tunnel byte at offset $received');
+              }
+              received++;
+            }
+          }
+        })().timeout(const Duration(seconds: 15));
+        expect(received, count * chunk.length);
+      });
+      test('raw slow reader closes after owner drain deadline', () async {
+        final server = await _bind(mode);
+        final detached = Completer<Socket>();
+        server.listen((request) async {
+          final socket = await request.response.detachSocket(
+            writeHeaders: false,
+          );
+          final chunk = Uint8List(1024 * 1024);
+          for (var i = 0; i < 64; i++) {
+            socket.add(chunk);
+          }
+          detached.complete(socket);
+        });
+        final client = await Socket.connect('127.0.0.1', server.port);
+        addTearDown(() async {
+          client.destroy();
+          await server.close(force: true);
+        });
+        // Deliberately never subscribe to the client's incoming stream.
+        client.write('GET /slow HTTP/1.1\r\nHost: fixture.test\r\n\r\n');
+        final socket = await detached.future.timeout(
+          const Duration(seconds: 3),
+        );
+        addTearDown(socket.destroy);
+        final drained = socket.drain<void>();
+        final owned = <Socket>{socket};
+        unawaited(socket.done.whenComplete(() => owned.remove(socket)));
+        await server.close().timeout(const Duration(seconds: 3));
+        await socket.close().timeout(
+          const Duration(seconds: 1),
+          onTimeout: () {
+            for (final pending in owned) {
+              pending.destroy();
+            }
+            return socket;
+          },
+        );
+        for (final pending in owned) {
+          pending.destroy();
+        }
+        await drained.timeout(const Duration(seconds: 2));
+      });
       for (final force in [false, true]) {
         test(
           'detached WebSocket survives HTTP server close force=$force',

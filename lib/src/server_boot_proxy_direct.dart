@@ -91,8 +91,12 @@ NativeProxyServer _startNativeDirectProxy({
       onSocketClosed?.call();
     }
 
-    Future<void> pushResponsePayload(Uint8List responsePayload) async {
+    Future<void> pushResponsePayload(
+      Uint8List responsePayload, {
+      bool requireAccepted = false,
+    }) async {
       if (proxyRef.isClosed) {
+        if (requireAccepted) throw StateError('Native tunnel is closed');
         return;
       }
       final pushed = await proxyRef.pushDirectResponseFrameAsync(
@@ -100,6 +104,7 @@ NativeProxyServer _startNativeDirectProxy({
         responsePayload,
       );
       if (!pushed) {
+        if (requireAccepted) throw StateError('Native tunnel rejected a frame');
         _nativeVerboseLog(
           '[server_native] native direct callback push failed for requestId=$requestId',
         );
@@ -110,17 +115,23 @@ NativeProxyServer _startNativeDirectProxy({
       BridgeDetachedSocket detachedSocket, {
       required Future<void> Function(Uint8List chunkBytes) emitChunk,
     }) async {
-      final prefetched = detachedSocket.takePrefetchedTunnelBytes();
-      if (prefetched != null && prefetched.isNotEmpty) {
-        await emitChunk(prefetched);
+      Future<void> emitBounded(Uint8List bytes) async {
+        // Socket read chunks can grow beyond the native frame limit when a
+        // writer floods the loopback pair. Bound every frame and await native
+        // capacity before reading the next chunk; never discard rejected data.
+        for (var offset = 0; offset < bytes.length; offset += 16384) {
+          final end = offset + 16384 < bytes.length
+              ? offset + 16384
+              : bytes.length;
+          await emitChunk(Uint8List.sublistView(bytes, offset, end));
+        }
       }
+
+      final prefetched = detachedSocket.takePrefetchedTunnelBytes();
+      if (prefetched != null) await emitBounded(prefetched);
       final bridgeIterator = detachedSocket.bridgeIterator();
       while (await bridgeIterator.moveNext()) {
-        final chunk = bridgeIterator.current;
-        if (chunk.isEmpty) {
-          continue;
-        }
-        await emitChunk(chunk);
+        await emitBounded(bridgeIterator.current);
       }
     }
 
@@ -198,6 +209,7 @@ NativeProxyServer _startNativeDirectProxy({
                   emitChunk: (chunk) async {
                     await pushResponsePayload(
                       BridgeTunnelFrame.encodeChunkPayload(chunk),
+                      requireAccepted: true,
                     );
                   },
                 );
@@ -207,6 +219,7 @@ NativeProxyServer _startNativeDirectProxy({
                   emitChunk: (chunk) async {
                     await pushResponsePayload(
                       BridgeResponseFrame.encodeChunkPayload(chunk),
+                      requireAccepted: true,
                     );
                   },
                 );

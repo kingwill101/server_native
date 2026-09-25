@@ -17,7 +17,8 @@ are documented in `fixtures/http_server/README.md`.
 
 The fixture suite adds repeated headers and encoded URLs, chunk extensions,
 invalid framing, fragment rejection, streaming upload with a paused reader,
-application-written raw responses, and detached raw/WebSocket lifetime across
+application-written raw responses, slow-reader lossless delivery and drain
+deadlines, and detached raw/WebSocket lifetime across
 graceful and forced HTTP listener closure.
 
 ## Zig-only cutover validation
@@ -31,6 +32,20 @@ graceful and forced HTTP listener closure.
 - Binding generation from the Zig header, workflow YAML parsing, and
   `git diff --check` passed. No Cargo build or Rust dependency remains.
 
+## Slow-reader fix validation
+
+Direct tunnel forwarding now splits coalesced socket reads into 16 KiB frames,
+awaits native queue capacity, and treats rejected output as a closed tunnel.
+Previously, reads above the native frame-size limit could be silently discarded,
+allowing the local writer to appear drained while the remote peer had stalled.
+
+- 36 fixture tests pass across dart:io, Zig direct, and Zig bridge, including
+  byte-for-byte 32 MiB delivery and a 64 MiB flood with a drain deadline.
+- 133 existing SDK/edge/HTTP/direct regression tests pass.
+- All 8 Relic RC `hijack_shutdown_test.dart` cases pass, including the previously
+  failing slow-reader drain deadline. The full framework suite was not rerun.
+- Analysis still reports only the existing 26 informational lints.
+
 ## Evidence before the Zig-only cutover
 
 Dart 3.13.4, Linux x64:
@@ -41,10 +56,10 @@ Dart 3.13.4, Linux x64:
 - Relic 2.0.0-rc.1 full run: relic_core 1039 passed/3 skipped; relic_io 193
   passed; relic 2650 passed/3 failed/4 skipped.
 - New fixture run before the additional manual-response case: 27 passed.
-- Latest targeted Relic shutdown run: 7 passed/1 failed. The original three
+- Pre-fix targeted Relic shutdown run: 7 passed/1 failed. The original three
   detached-socket ownership failures passed after separating listener shutdown
-  from detached tunnel lifetime. A peer that stops reading still exposes a
-  graceful raw-socket drain failure.
+  from detached tunnel lifetime. The slow-reader failure
+  from that run is fixed by the bounded-frame change validated above.
 
 These are scoped prior results, not a claim that every test passes after the
 cutover. Rust is removed and is no longer a validation target.

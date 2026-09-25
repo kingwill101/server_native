@@ -12,7 +12,8 @@ The fragment fixture uses a handler that rejects URI fragments; parsers may
 reject the request earlier.
 
 The accompanying live cases exercise chunked uploads with a paused response
-reader, raw binary detachment, WebSocket echo, listener closure, and owner-driven
+reader, a 32 MiB raw transfer checked byte for byte after the reader resumes,
+and a 64 MiB raw flood with an owner-enforced drain deadline, raw binary detachment, WebSocket echo, listener closure, and owner-driven
 WebSocket close handshakes. Both graceful and forced listener closure must leave
 detached sockets usable. Timeouts bound hangs; they are not performance targets.
 
