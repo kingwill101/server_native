@@ -1,6 +1,6 @@
 name: server_native
 description: Zig-backed transport boot APIs for Dart HTTP servers.
-version: 1.0.0-dev
+version: 1.0.0-dev.1
 false_secrets:
   - zig/src/testdata/*.pem
   - example/http2/key.pem

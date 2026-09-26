@@ -10,7 +10,7 @@
 `server_native` provides a Zig-backed HTTP server runtime for Dart with a
 `dart:io`-like programming model.
 `NativeHttpServer` implements `HttpServer`, allowing existing `HttpRequest` and
-`HttpResponse` handlers to run on the native transport. Version **1.0.0-dev** is
+`HttpResponse` handlers to run on the native transport. Version **1.0.0-dev.1** is
 a prerelease; compatibility is tested against `dart:io`, but is not complete.
 
 ## Native Runtime Status
@@ -61,7 +61,7 @@ Release maintainers: see [publishing with Firehose](doc/publishing.md).
 
 ```yaml
 dependencies:
-  server_native: ^1.0.0-dev
+  server_native: ^1.0.0-dev.1
 ```
 
 For an AOT deployment, build a CLI bundle so Dart includes the native library:

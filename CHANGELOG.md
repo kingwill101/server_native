@@ -2,6 +2,14 @@
 
 All notable changes to `server_native` will be documented in this file.
 
+## 1.0.0-dev.1
+
+- Correct README protocol defaults, Dart API-DL transport descriptions, TLS and
+  platform limits, and compatibility scope; remove obsolete Rust benchmark tables.
+- Reuse the checksum-pinned `1.0.0-dev` native binaries; no runtime changes.
+- Generate release metadata from the configured binary tag so documentation-only
+  package updates can retain their verified prebuilts.
+
 ## 1.0.0-dev
 
 ### Breaking changes

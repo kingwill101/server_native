@@ -1,7 +1,7 @@
 import 'dart:io';
 
 const _pubspecVersionPattern = r'^version:\s*([^\s]+)\s*$';
-const _prebuiltTagPrefix = 'server-native-prebuilt-v';
+const _prebuiltTagPattern = r'^  tag:\s*([^\s]+)\s*$';
 
 Future<void> main() async {
   final packageRoot = Directory.current;
@@ -24,7 +24,18 @@ Future<void> main() async {
   }
 
   final version = match.group(1)!;
-  final prebuiltTag = '$_prebuiltTagPrefix$version';
+  final prebuiltConfig = await File('${packageRoot.path}/zig_prebuilt.yaml')
+      .readAsString();
+  final tagMatch = RegExp(
+    _prebuiltTagPattern,
+    multiLine: true,
+  ).firstMatch(prebuiltConfig);
+  if (tagMatch == null) {
+    stderr.writeln('Unable to parse release tag from zig_prebuilt.yaml');
+    exitCode = 1;
+    return;
+  }
+  final prebuiltTag = tagMatch.group(1)!;
   final outputFile = File(
     '${packageRoot.path}/lib/src/generated/prebuilt_release.g.dart',
   );
