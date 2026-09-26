@@ -12,19 +12,7 @@ const dart = @cImport({
     @cInclude("dart_api_dl.h");
 });
 
-const Mutex = struct {
-    state: std.atomic.Value(u8) = .init(0),
-
-    fn lock(self: *Mutex) void {
-        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *Mutex) void {
-        self.state.store(0, .release);
-    }
-};
+const Mutex = @import("mutex.zig").Mutex;
 
 const PendingResponse = struct {
     wake: ?http1.WakeSignal = null,
@@ -234,6 +222,8 @@ pub const ProxyServer = struct {
         }
         self.pending.deinit();
         self.pending_mutex.unlock();
+        self.pending_mutex.deinit();
+        self.connections_mutex.deinit();
         self.allocator.free(@constCast(self.backend_host));
         self.allocator.free(@constCast(self.backend_path));
         if (self.tls) |*context| context.deinit();
@@ -320,8 +310,9 @@ pub const ProxyServer = struct {
             return;
         }
         while (!self.stopped.load(.acquire)) {
+            owned_connection.response_started = false;
             const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection, &input) catch |err| {
-                if (self.stopped.load(.acquire) or err == error.InvalidRequest) break;
+                if (self.stopped.load(.acquire) or owned_connection.response_started or err == error.InvalidRequest) break;
                 if (err == error.InvalidRequestTarget or err == error.InvalidTransferEncoding) {
                     http1.sendAllConnection(&owned_connection, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n") catch {};
                     break;
