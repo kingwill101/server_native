@@ -14,18 +14,7 @@ Future<void> main(List<String> args) async {
 }
 
 bool _isSourceCheckout(Uri packageRoot) {
-  var directory = Directory.fromUri(packageRoot).absolute;
-  while (true) {
-    if (File('${directory.path}/.git').existsSync() ||
-        Directory('${directory.path}/.git').existsSync()) {
-      return true;
-    }
-    final hasPackages = Directory('${directory.path}/packages').existsSync();
-    if (File('${directory.path}/pubspec.yaml').existsSync() && hasPackages) {
-      return true;
-    }
-    final parent = directory.parent;
-    if (parent.path == directory.path) return false;
-    directory = parent;
-  }
+  final directory = Directory.fromUri(packageRoot).absolute;
+  return File('${directory.path}/.git').existsSync() ||
+      Directory('${directory.path}/.git').existsSync();
 }

@@ -2,17 +2,40 @@
 
 All notable changes to `server_native` will be documented in this file.
 
-## Unreleased
+## 1.0.0-dev
 
-- Removed the Rust runtime, Cargo build, bindings and release artifacts. Zig is
-  now the sole backend, supporting Linux x64 and ARM64.
-- Added Dart API-DL notification and native lifecycle support.
-- Added a bounded, thread-safe Zig event queue with copied payload ownership, backpressure, and Dart API-DL delivery.
+### Breaking changes
 
-- Added verified prebuilt-native metadata and streamlined native asset
-  resolution for supported platforms.
-- Expanded native HTTP compatibility coverage for callbacks, headers,
-  transfer encoding, and framework integrations.
+- Zig 0.16 replaces the Rust runtime, Cargo toolchain, bindings, and artifacts.
+- Supported native targets are Linux x64 and ARM64. This prerelease does not
+  support the other platforms previously served by Rust.
+- Requires Dart 3.13 or later. The public Dart HTTP server API is retained;
+  legacy Rust backend selectors no longer select a runtime.
+
+### Protocols and compatibility
+
+- Added Zig HTTP/1.1 and TLS, HTTP/2 through nghttp2, and HTTP/3 through
+  ngtcp2/nghttp3 with BoringSSL.
+- Added incremental responses, keep-alive and pipelining, chunked bodies,
+  TCP/Unix bridge modes, and direct Dart-port request handling.
+- Preserved WebSocket upgrades and detached sockets across HTTP server close;
+  bounded tunnel frames prevent byte loss with slow readers.
+- Fixed truncated-response handling, TLS handshake isolation, and shutdown
+  without an active request listener.
+- Added HTTP/3 streaming, cancellation, flow control, graceful shutdown, and
+  independent curl/aioquic interoperability coverage.
+- Expanded dart:io, Shelf, and Relic 2 RC compatibility tests and wire fixtures.
+
+### Runtime and distribution
+
+- Added Firehose PR release validation and tag-triggered pub.dev publishing.
+
+- Added bounded native queues, Dart API-DL wake notifications, and parking
+  mutexes to avoid spinning under worker contention.
+- Added verified Linux x64/ARM64 prebuilt release packaging with archive and
+  library checksums, architecture validation, and a Zig source-build fallback.
+- Moved package and binary-release metadata to the standalone server_native
+  repository. Updated the setup utility to use the pinned verified manifest.
 
 ## 0.1.3+1
 
