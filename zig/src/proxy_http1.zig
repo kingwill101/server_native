@@ -296,6 +296,7 @@ const ResponseWriter = struct {
                 try output.appendSlice(allocator, if (self.keep_alive) "connection: keep-alive\r\n" else "connection: close\r\n");
             }
             try output.appendSlice(allocator, "\r\n");
+            connection.response_started = true;
             try http1.sendAllConnection(connection, output.items);
             self.started = true;
         }
@@ -303,10 +304,11 @@ const ResponseWriter = struct {
             if (self.chunked) {
                 var size: [32]u8 = undefined;
                 const prefix = try std.fmt.bufPrint(&size, "{x}\r\n", .{response.body.items.len});
-                try http1.sendAllConnection(connection, prefix);
+                // Emit each chunk in one write instead of three tiny TCP/TLS writes.
+                try response.body.insertSlice(allocator, 0, prefix);
+                try response.body.appendSlice(allocator, "\r\n");
             }
             try http1.sendAllConnection(connection, response.body.items);
-            if (self.chunked) try http1.sendAllConnection(connection, "\r\n");
         }
         response.body.clearRetainingCapacity();
         if (done and self.chunked) try http1.sendAllConnection(connection, "0\r\n\r\n");
@@ -511,6 +513,7 @@ fn writeUpgradeResponse(allocator: std.mem.Allocator, connection: *http1.Connect
     try appendFormat(allocator, &output, "HTTP/1.1 {d} {s}\r\n", .{ status, reason(status) });
     for (headers) |header| try appendFormat(allocator, &output, "{s}: {s}\r\n", .{ header.name, header.value });
     try output.appendSlice(allocator, "\r\n");
+    connection.response_started = true;
     try http1.sendAllConnection(connection, output.items);
 }
 
@@ -569,6 +572,7 @@ fn writeHttpResponse(
     }
     try output.appendSlice(allocator, "\r\n");
     try output.appendSlice(allocator, body);
+    connection.response_started = true;
     try http1.sendAllConnection(connection, output.items);
 }
 

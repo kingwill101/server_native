@@ -245,27 +245,70 @@ void main() {
     expect(body, 'chunked response');
   });
 
-  test('returns 502 when chunked bridge response misses end frame', () async {
-    final harness = await _startProxyHarness((socket) async {
-      final startPayload = BridgeResponseFrame(
-        status: HttpStatus.ok,
-        headers: const <MapEntry<String, String>>[],
-        bodyBytes: Uint8List(0),
-      ).encodeStartPayload();
-      await _writeFramedPayload(socket, startPayload);
-      socket.destroy();
-    });
-    addTearDown(() async => harness.close());
+  test(
+    'dart:io reports a truncated body after a committed response is aborted',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final flushed = Completer<void>();
+      server.listen((request) async {
+        request.response.bufferOutput = false;
+        request.response.write('partial');
+        await request.response.flush();
+        flushed.complete();
+      });
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final request = await client.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/'),
+      );
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.ok);
+      final truncated = expectLater(
+        response.drain<void>(),
+        throwsA(isA<HttpException>()),
+      );
+      await flushed.future;
+      await server.close(force: true);
+      await truncated;
+    },
+  );
 
-    final (status, body) = await _requestText(
-      harness.baseUri.replace(path: '/'),
+  for (final invalidFrame in [false, true]) {
+    test(
+      'closes committed response without a second status line (invalid=$invalidFrame)',
+      () async {
+        final harness = await _startProxyHarness((socket) async {
+          final startPayload = BridgeResponseFrame(
+            status: HttpStatus.ok,
+            headers: const <MapEntry<String, String>>[],
+            bodyBytes: Uint8List(0),
+          ).encodeStartPayload();
+          await _writeFramedPayload(socket, startPayload);
+          if (invalidFrame) await _writeFramedPayload(socket, [1, 255]);
+          socket.destroy();
+        });
+        addTearDown(() async => harness.close());
+
+        final socket = await Socket.connect(
+          harness.baseUri.host,
+          harness.baseUri.port,
+        );
+        addTearDown(socket.destroy);
+        final received = latin1.decoder.bind(socket).join();
+        socket.write(
+          'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n',
+        );
+        final wire = await received.timeout(const Duration(seconds: 3));
+        expect(wire, startsWith('HTTP/1.1 200 '));
+        expect('HTTP/1.1'.allMatches(wire), hasLength(1));
+        // No terminal chunk: the peer must observe a truncated response.
+        expect(wire.split('\r\n\r\n').skip(1).join('\r\n\r\n'), isEmpty);
+        await expectLater(
+          _requestText(harness.baseUri),
+          throwsA(isA<HttpException>()),
+        );
+      },
     );
-    expect(status, HttpStatus.badGateway);
-    expect(body, contains('bridge call failed'));
-    expect(
-      body.contains('before response end') ||
-          body.contains('read frame header failed'),
-      isTrue,
-    );
-  });
+  }
 }

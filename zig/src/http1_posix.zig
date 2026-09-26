@@ -105,6 +105,7 @@ pub const TlsContext = struct {
 pub const Connection = struct {
     fd: Fd,
     ssl: ?*c.SSL = null,
+    response_started: bool = false,
 
     pub fn acceptTls(self: *Connection, context: *const TlsContext) !void {
         const ssl = c.SSL_new(context.ctx) orelse return error.TlsConnectionFailed;

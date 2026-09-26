@@ -16,7 +16,7 @@ CI evidence. Preserve SDK/direct/bridge parity and existing benchmark thresholds
 
 ## Blockers
 
-- [ ] Fix failure handling after HTTP/1 response headers have been sent. The
+- [x] Fix failure handling after HTTP/1 response headers have been sent. The
   missing-response-end test receives a chunk-parser error (`72 is expected to
   be a Hex digit`), indicating unexpected bytes in the chunk stream. Check all
   error handlers before deciding whether the old 502 expectation remains valid.
@@ -34,5 +34,21 @@ CI evidence. Preserve SDK/direct/bridge parity and existing benchmark thresholds
 
 Add reproduction commands, scoped fixes, and validation results as commits land.
 Record hosted run links and the tested commit; distinguish a failed assertion,
-implementation defect, and environment failure. Serinus is outside the maintained
-compatibility matrix; Relic coverage targets version 2 RC and later releases.
+implementation defect, and environment failure. Relic coverage targets version 2
+RC and later releases.
+
+
+## First runtime follow-up
+
+- Mark a response committed before writing its headers, including upgrade and
+  finite responses. Reset the marker for each keep-alive request. Later errors
+  close the connection instead of appending a second HTTP status line.
+- Retain gateway-error behavior before commitment. Missing response-end and
+  malformed post-header frames now have wire-level truncation assertions and
+  client error checks; a dart:io forced-close fixture establishes the reference.
+- Coalesce each chunk's size, payload, and delimiter into one socket write.
+  Response streaming and existing benchmark thresholds are preserved.
+- Local validation: Zig tests passed; 34 combined framing/failure tests passed,
+  then all 10 failure tests passed including the added dart:io reference.
+- Exact local benchmark gate passed: throughput ratio 0.960, p95 ratio 1.304.
+  Hosted performance remains an open gate until the new PR checks complete.

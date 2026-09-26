@@ -320,8 +320,9 @@ pub const ProxyServer = struct {
             return;
         }
         while (!self.stopped.load(.acquire)) {
+            owned_connection.response_started = false;
             const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection, &input) catch |err| {
-                if (self.stopped.load(.acquire) or err == error.InvalidRequest) break;
+                if (self.stopped.load(.acquire) or owned_connection.response_started or err == error.InvalidRequest) break;
                 if (err == error.InvalidRequestTarget or err == error.InvalidTransferEncoding) {
                     http1.sendAllConnection(&owned_connection, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n") catch {};
                     break;
