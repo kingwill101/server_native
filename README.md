@@ -9,9 +9,9 @@
 
 `server_native` provides a Zig-backed HTTP server runtime for Dart with a
 `dart:io`-like programming model.
-For most server code, it is intended to be a drop-in replacement for
-`HttpServer`: keep the same request/response handling and swap only the bind
-bootstrap.
+`NativeHttpServer` implements `HttpServer`, allowing existing `HttpRequest` and
+`HttpResponse` handlers to run on the native transport. Version **1.0.0-dev** is
+a prerelease; compatibility is tested against `dart:io`, but is not complete.
 
 ## Native Runtime Status
 
@@ -21,21 +21,22 @@ been removed. Current supported targets are **Linux x64 and ARM64**; the old
 Rust-supported platforms are not supported by this version.
 
 Zig serves HTTP/1.1 with TLS, HTTP/2, and HTTP/3 through the existing Dart API.
-See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status) and
-[HttpServer compatibility findings](test/HTTP_SERVER_PARITY.md). Removing Rust
-does not mean every compatibility or release gate has passed.
+HTTP/2 uses nghttp2; HTTP/3 uses ngtcp2 and nghttp3; TLS uses BoringSSL.
+See [compatibility and limits](#compatibility-and-limits) before migrating.
 
 Linux artifacts are configured in `zig_prebuilt.yaml`. Release packages use a
 checksum-pinned manifest to download matching Linux x64/ARM64 libraries. Prebuilts
 require glibc 2.28 or later. Source builds require Zig 0.16 on PATH; Cargo is not
-required. This `1.0.0-dev` release is a prerelease for compatibility testing.
+required. Dart **3.13 or later** is required. macOS, Windows, mobile platforms,
+and Linux musl distributions are outside the supported prebuilt targets.
 
 ## Table Of Contents
 
 - [Install](#install)
 - [Native Runtime Status](#native-runtime-status)
 - [Quick Start (`HttpServer` Style)](#quick-start-httpserver-style)
-- [Drop-In `HttpServer` Replacement](#drop-in-httpserver-replacement)
+- [Migrating from `HttpServer`](#migrating-from-httpserver)
+- [Compatibility and Limits](#compatibility-and-limits)
 - [Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)](#protocol-support-http11-http2-http3)
 - [Address Semantics](#address-semantics)
 - [Multi-Server Binding (`NativeHttpServer.loopback`)](#multi-server-binding-nativehttpserverloopback)
@@ -103,10 +104,10 @@ Future<void> main() async {
 }
 ```
 
-## Drop-In `HttpServer` Replacement
+## Migrating from `HttpServer`
 
-Existing `HttpRequest`/`HttpResponse` logic can remain unchanged.
-Typical migration:
+For plaintext servers, change the binding call and retain your request handler.
+Run your application tests against both implementations before switching:
 
 - before: `HttpServer.bind(...)`
 - after: `NativeHttpServer.bind(...)`
@@ -121,7 +122,7 @@ Future<void> main() async {
   await for (final request in server) {
     request.response
       ..statusCode = HttpStatus.ok
-      ..write('drop-in ok');
+      ..write('native server ok');
     await request.response.close();
   }
 }
@@ -129,20 +130,42 @@ Future<void> main() async {
 
 ## Protocol Support (HTTP/1.1, HTTP/2, HTTP/3)
 
-The protocol support below is provided by the Zig transport.
+The public server boot APIs use these defaults:
 
-- HTTP/1.1: supported for plaintext and TLS servers.
-- HTTP/2: controlled explicitly with `http2` (defaults to `true`).
-- HTTP/3: supported only with TLS and QUIC.
+| Protocol | Default | How it is served |
+| --- | --- | --- |
+| HTTP/1.1 | Enabled | Plain TCP or TLS |
+| HTTP/2 | `http2: false` | Enable explicitly; plaintext prior knowledge or TLS ALPN `h2` |
+| HTTP/3 | `http3: true` on secure boots | QUIC over UDP; disabled automatically without TLS |
 
-Notes:
+For TLS with HTTP/1.1 only, set both `http2: false` and `http3: false`.
+With HTTP/3 enabled, allow UDP traffic on the listener port as well as TCP.
+HTTP/1.1 and HTTP/2 responses advertise the live HTTP/3 listener with `Alt-Svc`.
 
-- TLS certificates do not implicitly force HTTP/2. If you want TLS + HTTP/1.1
-  only, set `http2: false`.
-- `http3` options default to `true`, but HTTP/3 is automatically disabled for
-  insecure (non-TLS) server boots.
-- If TLS cert/key are not configured, server boots run in HTTP/1.1 + optional
-  HTTP/2 mode only (based on `http2`).
+## Compatibility and Limits
+
+- Tested behavior includes HTTP/1 framing and persistence, streaming bodies,
+  response headers, shared binding, IPv6, HTTP/1 WebSocket upgrades, detached
+  sockets, slow readers, and listener shutdown in direct and bridge modes.
+- `bindSecure` takes `certificatePath` and `keyPath`, rather than the SDK's
+  `SecurityContext` argument. The Zig runtime does not currently implement the
+  `requestClientCertificate` option; do not use it for client-certificate
+  authentication.
+- Framework validation covers Shelf and a pinned Relic 2 RC release. The framework
+  adapters replace plaintext bindings; their secure tests still use `dart:io`.
+  Package-level TLS tests exercise Zig separately. Relic CI is currently advisory
+  (`continue-on-error`), while Shelf CI is required.
+- HTTP/3 currently accepts QUIC v1, disables active migration, and uses handshake
+  proof for address validation without issuing Retry or NEW_TOKEN. Native memory
+  budgets exclude BoringSSL, kernel, and Dart application buffers. Use awaited
+  `addStream`/`flush` when producing large responses; synchronous writes can buffer
+  in Dart. See the [HTTP/3 runtime limits](zig/DEPENDENCIES.md#http3-runtime-status).
+- [Compatibility findings](test/HTTP_SERVER_PARITY.md) record historical scoped
+  runs. They are not a certification of every SDK behavior or platform.
+
+The Linux x64 and ARM64 release libraries passed native and Dart integration
+checks on their respective architectures. Automatic prebuilt installation and
+AOT bundle execution were also verified on Linux x64 for `1.0.0-dev`.
 
 ## Address Semantics
 
@@ -309,9 +332,10 @@ Future<void> main() async {
 ```
 
 `nativeCallback` defaults to `true` for `NativeHttpServer` and `serveNative*`
-`HttpRequest` APIs, which means direct FFI callback transport is used by
-default. Set `nativeCallback: false` to force bridge socket transport.
-WebSocket upgrade is supported in either mode.
+`HttpRequest` APIs. Despite the option name, the Zig runtime uses a native event
+queue with Dart API-DL port notifications; Dart drains events through FFI. Set
+`nativeCallback: false` to use the socket/frame bridge. HTTP/1 WebSocket upgrades
+are covered in both modes.
 
 ## Direct Handler API (`NativeDirectRequest`)
 
@@ -347,7 +371,8 @@ Future<void> main() async {
 }
 ```
 
-For lowest overhead callback routing, enable native callback mode:
+`serveNativeDirect` defaults to the socket bridge (`nativeDirect: false`).
+Set `nativeDirect: true` to use the native event queue and bypass that bridge:
 
 ```dart
 import 'dart:io';
@@ -408,41 +433,21 @@ Modes:
 
 ## Framework Benchmarks
 
-Framework transport benchmarks live in `benchmark/`:
+The current CI benchmark compares the Zig transport with `dart:io` over HTTP/1:
 
-```bash
-dart run benchmark/framework_transport_benchmark.dart --framework=all
+```sh
+dart run tool/benchmark_transport.dart \
+  --requests=2500 --concurrency=64 --warmup=300 --iterations=3 --json
 ```
 
-Historical Rust harness snapshot (not Zig results; February 19, 2026; `requests=2500`, `concurrency=64`,
-`warmup=300`, `iterations=25`):
+CI requires a throughput ratio of at least 0.70 and a p95 latency ratio of at most
+1.60 relative to its reference case. Passing this regression gate is not a claim
+that Zig is faster for every workload. It does not benchmark HTTP/2 or HTTP/3.
+Use the JSON results from a consistent machine and workload for comparisons.
 
-Note: these values were measured on a local development machine and are
-intended for relative comparison. See `benchmark/README.md` for full test
-machine specs and run context.
-
-Mode meaning in this table:
-
-- `nativeCallback=true`: `NativeHttpServer` uses direct FFI callback handling
-  (bridge socket bypassed).
-- `nativeCallback=false`: `NativeHttpServer` uses the bridge socket/frame
-  transport between Zig and Dart.
-
-| Mode | Top result | req/s | p95 |
-| --- | --- | ---: | ---: |
-| `nativeCallback=true` | `native_direct_rust` | 12362 | 6.34 ms |
-| `nativeCallback=false` | `native_direct_rust` | 12656 | 6.17 ms |
-
-Framework pair highlights from the same harness:
-
-| Framework | `*_io` | `*_native` (`nativeCallback=true`) | `*_native` (`nativeCallback=false`) |
-| --- | ---: | ---: | ---: |
-| `dart:io` | 7703 req/s, p95 9.72 ms | 8370 req/s, p95 9.05 ms | 7565 req/s, p95 10.60 ms |
-| `routed` | 5703 req/s, p95 12.51 ms | 7110 req/s, p95 10.88 ms | 6392 req/s, p95 11.93 ms |
-| `relic` | 5073 req/s, p95 14.46 ms | 6823 req/s, p95 11.31 ms | 5990 req/s, p95 12.73 ms |
-| `shelf` | 5181 req/s, p95 14.08 ms | 6524 req/s, p95 11.66 ms | 5843 req/s, p95 13.07 ms |
-
-See `benchmark/README.md` for full result tables, options, and case labels.
+The separate framework benchmark in `benchmark/` still has historical Rust
+results and older development dependencies. Those results do not describe the
+published Zig runtime or the Relic 2 RC compatibility matrix.
 
 ## Framework Compatibility Suites (Local + CI)
 
@@ -453,9 +458,9 @@ transport modes:
 - `SERVER_NATIVE_COMPAT=false` (`io`): framework binds with `dart:io` `HttpServer`
 - `SERVER_NATIVE_COMPAT=true` (`native`): framework binds with `NativeHttpServer`
 
-Relic compatibility targets **2.0.0-rc.1 and newer releases**. The harness
-pins `v2.0.0-rc.1` for reproducibility; Relic 1.x is outside the supported
-compatibility matrix.
+The harness pins Relic **v2.0.0-rc.1** for reproducibility. The intended scope is
+Relic 2 RC and later; newer releases need their own validation. Relic 1.x is
+outside this matrix.
 
 Run locally from repo root:
 
@@ -491,18 +496,22 @@ Run it directly:
 dart test test/sdk_http_server_compat_test.dart
 ```
 
-The suite is ported from SDK standalone IO `HttpServer` tests and currently
-contains:
+The SDK-derived suite covers headers, charset encoding, connection persistence,
+content-length errors, shared binding, and other server semantics. Additional
+wire fixtures and edge cases compare `dart:io`, Zig direct, and Zig bridge:
 
-- default response-header behavior
-- content-type charset encoding behavior for `response.write`
-- connection-header/persistent-connection behavior
-- content-length mismatch error behavior (`response.done`)
-- shared bind behavior (`shared: true`)
+```sh
+dart test test/sdk_http_server_compat_test.dart \
+  test/sdk_http_server_edge_cases_test.dart \
+  test/sdk_http_server_fixtures_test.dart \
+  test/http1_framing_regression_test.dart
+```
 
-Some native parity cases are explicitly `skip`ped with a reason string until
-the corresponding behavior matches `dart:io`. Those skip reasons serve as an
-up-to-date checklist for remaining `HttpServer` parity work.
+Independent protocol checks live in `test/http2_runtime_test.dart` and
+`test/http3_runtime_test.dart`. External-client cases require their configured
+clients (for example `H2SPEC` and `AIOQUIC_PYTHON`) and may otherwise skip. See
+[protocol testing instructions](zig/TESTING.md) and the
+[dependency/runtime guide](zig/DEPENDENCIES.md) for prerequisites.
 
 ## Native Bindings
 
@@ -521,13 +530,10 @@ requires Cargo or cbindgen.
 `.github/workflows/server_native_prebuilt.yml` builds and tests Linux x64 and
 ARM64 artifacts on their native architectures. Archives are named
 `server_native-zig-<platform>.tar.gz`, with `server-native-prebuilt-v*` release tags.
-Only verified Zig assets belong in the generated manifest:
-
-```bash
-dart run native_prebuilt manifest update \
-  --config zig_prebuilt.yaml \
-  --output lib/src/generated/server_native_zig_prebuilts.g.dart
-```
+The release workflow generates archive and library checksums from the tested
+binaries. Commit that generated manifest as described in the
+[release guide](doc/publishing.md); published packages pin a specific binary
+release rather than downloading an arbitrary latest build.
 
 The build hook prefers verified release/cache artifacts for published packages
 and falls back to Zig source compilation. Workspace checkouts build current
