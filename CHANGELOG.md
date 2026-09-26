@@ -28,6 +28,8 @@ All notable changes to `server_native` will be documented in this file.
 
 ### Runtime and distribution
 
+- Added Firehose PR release validation and tag-triggered pub.dev publishing.
+
 - Added bounded native queues, Dart API-DL wake notifications, and parking
   mutexes to avoid spinning under worker contention.
 - Added verified Linux x64/ARM64 prebuilt release packaging with archive and

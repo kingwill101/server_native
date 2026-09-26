@@ -54,6 +54,8 @@ required. This `1.0.0-dev` release is a prerelease for compatibility testing.
 - [Prebuilt Native Artifacts](#prebuilt-native-artifacts)
 - [Troubleshooting](#troubleshooting)
 
+Release maintainers: see [publishing with Firehose](doc/publishing.md).
+
 ## Install
 
 ```yaml
