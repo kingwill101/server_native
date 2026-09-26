@@ -52,3 +52,19 @@ RC and later releases.
   then all 10 failure tests passed including the added dart:io reference.
 - Exact local benchmark gate passed: throughput ratio 0.960, p95 ratio 1.304.
   Hosted performance remains an open gate until the new PR checks complete.
+
+## Queue contention follow-up
+
+Hosted run `36250350513` passed Zig CI after the response fix. Main CI passed
+runtime tests but failed Pub's singular-directory convention; this record moved
+from `docs/` to `doc/`. Hosted benchmark run `36250350518` still failed (throughput
+0.631, p95 2.941), so chunk-write coalescing alone was insufficient.
+
+The event queue and response map used busy-spin mutexes. They now share a parking
+pthread mutex with the existing HTTP/3 runtime, reducing contention among native
+workers and Dart on machines with few CPUs. A native eight-worker counter test
+checks mutual exclusion; existing queue and protocol concurrency tests also run.
+
+Validation: Zig tests passed; 47 Dart tests passed and 4 external-client cases
+were skipped. The exact benchmark gate passed with CPU affinity restricted to two
+CPUs: throughput ratio 1.314 and p95 ratio 1.016. Hosted results remain pending.

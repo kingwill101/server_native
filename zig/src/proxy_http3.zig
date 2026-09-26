@@ -8,18 +8,7 @@ const backing_allocator = std.heap.c_allocator;
 const Budget = @import("memory_budget.zig").Budget;
 const max_connections = 128;
 
-const Mutex = struct {
-    native: std.c.pthread_mutex_t = .{},
-    fn lock(self: *Mutex) void {
-        std.debug.assert(std.c.pthread_mutex_lock(&self.native) == .SUCCESS);
-    }
-    fn unlock(self: *Mutex) void {
-        std.debug.assert(std.c.pthread_mutex_unlock(&self.native) == .SUCCESS);
-    }
-    fn deinit(self: *Mutex) void {
-        std.debug.assert(std.c.pthread_mutex_destroy(&self.native) == .SUCCESS);
-    }
-};
+const Mutex = @import("mutex.zig").Mutex;
 
 fn now() u64 {
     var ts: c.timespec = undefined;

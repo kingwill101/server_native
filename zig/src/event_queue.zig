@@ -15,26 +15,11 @@ pub const Event = struct {
     payload: []u8,
 };
 
-const SpinMutex = struct {
-    state: std.atomic.Value(u8) = .init(0),
-
-    fn lock(self: *SpinMutex) void {
-        while (self.state.cmpxchgWeak(
-            0,
-            1,
-            .acquire,
-            .monotonic,
-        ) != null) {}
-    }
-
-    fn unlock(self: *SpinMutex) void {
-        self.state.store(0, .release);
-    }
-};
+const Mutex = @import("mutex.zig").Mutex;
 
 pub const Queue = struct {
     allocator: std.mem.Allocator,
-    mutex: SpinMutex = .{},
+    mutex: Mutex = .{},
     slots: []?Event,
     head: usize = 0,
     len: usize = 0,
@@ -79,6 +64,7 @@ pub const Queue = struct {
     }
 
     pub fn deinit(self: *Queue) void {
+        defer self.mutex.deinit();
         self.mutex.lock();
         defer self.mutex.unlock();
 

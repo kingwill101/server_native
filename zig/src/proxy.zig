@@ -12,19 +12,7 @@ const dart = @cImport({
     @cInclude("dart_api_dl.h");
 });
 
-const Mutex = struct {
-    state: std.atomic.Value(u8) = .init(0),
-
-    fn lock(self: *Mutex) void {
-        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *Mutex) void {
-        self.state.store(0, .release);
-    }
-};
+const Mutex = @import("mutex.zig").Mutex;
 
 const PendingResponse = struct {
     wake: ?http1.WakeSignal = null,
@@ -234,6 +222,8 @@ pub const ProxyServer = struct {
         }
         self.pending.deinit();
         self.pending_mutex.unlock();
+        self.pending_mutex.deinit();
+        self.connections_mutex.deinit();
         self.allocator.free(@constCast(self.backend_host));
         self.allocator.free(@constCast(self.backend_path));
         if (self.tls) |*context| context.deinit();
