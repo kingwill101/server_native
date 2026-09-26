@@ -25,9 +25,10 @@ See [runtime status and limits](zig/DEPENDENCIES.md#http3-runtime-status) and
 [HttpServer compatibility findings](test/HTTP_SERVER_PARITY.md). Removing Rust
 does not mean every compatibility or release gate has passed.
 
-Linux artifacts are configured in `zig_prebuilt.yaml`. The checked-in manifest
-is empty until matching release assets are published and verified. Source
-builds require Zig 0.16 on PATH; Cargo is not required.
+Linux artifacts are configured in `zig_prebuilt.yaml`. Release packages use a
+checksum-pinned manifest to download matching Linux x64/ARM64 libraries. Prebuilts
+require glibc 2.28 or later. Source builds require Zig 0.16 on PATH; Cargo is not
+required. This `1.0.0-dev` release is a prerelease for compatibility testing.
 
 ## Table Of Contents
 
@@ -519,7 +520,9 @@ The build hook prefers verified release/cache artifacts for published packages
 and falls back to Zig source compilation. Workspace checkouts build current
 sources. The optional `dart run server_native:setup` utility downloads Zig
 archives for Linux x64 or ARM64 into
-`.dart_tool/server_native/prebuilt/<tag>/<platform>/`.
+`.prebuilt/<platform>/` after checksum and architecture verification. Setup uses
+only the package-pinned release; arbitrary tags and `--tag latest` are not
+supported. Git checkouts build source unless `hooks.user_defines.server_native.prebuilt_path` explicitly selects a library for testing.
 
 ## Troubleshooting
 

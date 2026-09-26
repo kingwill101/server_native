@@ -18,7 +18,9 @@ Future<void> buildZigAsset(
     libraryStem: _zigLibraryName,
     manifest: zig_prebuilt.server_nativePrebuilts,
     linkModeResolver: (_) => DynamicLoadingBundled(),
-    resolvers: sourceCheckout ? const <PrebuiltResolver>[] : null,
+    resolvers: sourceCheckout
+        ? const <PrebuiltResolver>[UserDefinePrebuiltResolver()]
+        : null,
     sourceFallback: SourceFallback(
       sources: const [
         LocalSource(paths: <String>['.']),

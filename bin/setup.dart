@@ -1,267 +1,63 @@
-/// Downloads the prebuilt server_native library for a target platform.
-///
-/// Usage:
-///   dart run server_native:setup [--tag server-native-prebuilt-v0.1.2] [--platform linux-x64]
-///
-/// By default this resolves the package-matched prebuilt tag and host platform.
-/// Use `--tag latest` to resolve the newest available prebuilt tag instead.
+/// Downloads and verifies the package-matched Linux prebuilt library.
 library;
 
-import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 
-import 'package:server_native/src/generated/prebuilt_release.g.dart';
-
-const _repo = 'kingwill101/routed';
-const _latestTagAlias = 'latest';
-const _prebuiltTagPrefix = 'server-native-prebuilt-v';
-const _artifactPrefix = 'server_native-zig';
-const _projectPrebuiltRoot = '.dart_tool/server_native/prebuilt';
-const _supportedPlatforms = <String>{'linux-x64', 'linux-arm64'};
+import 'package:native_prebuilt/native_prebuilt.dart';
+import 'package:server_native/src/generated/server_native_zig_prebuilts.g.dart';
 
 Future<void> main(List<String> args) async {
-  var tag = serverNativePrebuiltReleaseTag;
   String? platform;
-
+  final release = server_nativePrebuilts.release as GitHubReleaseSource;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--tag':
-      case '-t':
-        tag = args[++i];
-      case '--platform':
-      case '-p':
-        platform = args[++i];
-      case '--help':
-      case '-h':
+      case '--help' || '-h':
         stdout.writeln(
-          'Usage: dart run server_native:setup [options]\n'
-          '\n'
-          'Downloads a prebuilt server_native library to:\n'
-          '  $_projectPrebuiltRoot/<tag>/<platform>/\n'
-          '\n'
-          'Options:\n'
-          '  --tag, -t       Binary release tag '
-          '(default: package-matched prebuilt tag; use "latest" to auto-discover)\n'
-          '  --platform, -p  e.g. linux-x64 (default: host platform)\n',
+          'Usage: dart run server_native:setup '
+          '[--platform linux-x64|linux-arm64]\n'
+          'Downloads checksum-verified artifacts for ${release.tag}.\n'
+          'Published-package build hooks also download them automatically.',
         );
         return;
-    }
-  }
-
-  platform ??= _hostPlatform();
-  if (!_supportedPlatforms.contains(platform)) {
-    stderr.writeln(
-      'Unsupported platform "$platform".\n'
-      'Supported: ${_supportedPlatforms.join(', ')}',
-    );
-    exitCode = 1;
-    return;
-  }
-
-  final filename = '$_artifactPrefix-$platform.tar.gz';
-  final resolvedTag = tag == _latestTagAlias
-      ? await _latestPrebuiltTag(requiredAssetName: filename)
-      : tag;
-  final projectRoot = _findProjectRoot(Directory.current);
-  final outDir = Directory(
-    '${projectRoot.path}/$_projectPrebuiltRoot/$resolvedTag/$platform',
-  )..createSync(recursive: true);
-
-  stdout.writeln('server_native setup');
-  stdout.writeln('  Repo:     $_repo');
-  stdout.writeln('  Tag:      $resolvedTag');
-  stdout.writeln('  Platform: $platform');
-  stdout.writeln('  Artifact: $filename');
-  stdout.writeln('  Target:   ${outDir.path}');
-  stdout.writeln('');
-
-  try {
-    await _downloadAndExtract(
-      tag: resolvedTag,
-      filename: filename,
-      outDir: outDir,
-    );
-    stdout.writeln('Done. Build hooks will now prefer this prebuilt artifact.');
-  } on Exception catch (error) {
-    stderr.writeln('Failed: $error');
-    exitCode = 1;
-  }
-}
-
-Future<void> _downloadAndExtract({
-  required String tag,
-  required String filename,
-  required Directory outDir,
-}) async {
-  final ghArgs = <String>[
-    'release',
-    'download',
-    tag,
-    '--repo',
-    _repo,
-    '--pattern',
-    filename,
-    '--dir',
-    outDir.path,
-    '--clobber',
-  ];
-  final ghResult = await Process.run('gh', ghArgs);
-
-  final tarPath = '${outDir.path}/$filename';
-  if (ghResult.exitCode != 0) {
-    final encodedTag = Uri.encodeComponent(tag);
-    final url =
-        'https://github.com/$_repo/releases/download/$encodedTag/$filename';
-    stdout.writeln('  gh CLI failed, falling back to curl...');
-    final curlResult = await Process.run('curl', [
-      '-fSL',
-      '--retry',
-      '3',
-      '-o',
-      tarPath,
-      url,
-    ]);
-    if (curlResult.exitCode != 0) {
-      throw Exception(
-        'Download failed.\n'
-        'gh stderr:\n${ghResult.stderr}\n'
-        'curl stderr:\n${curlResult.stderr}',
-      );
-    }
-  }
-
-  final extractResult = await Process.run('tar', [
-    'xzf',
-    tarPath,
-    '-C',
-    outDir.path,
-  ]);
-  if (extractResult.exitCode != 0) {
-    throw Exception('tar extract failed: ${extractResult.stderr}');
-  }
-
-  File(tarPath).deleteSync();
-
-  final extracted = outDir.listSync().whereType<File>().toList();
-  if (extracted.isEmpty) {
-    throw Exception('No files extracted to ${outDir.path}');
-  }
-  for (final file in extracted) {
-    stdout.writeln('  Extracted: ${file.path}');
-  }
-}
-
-Future<String> _latestPrebuiltTag({required String requiredAssetName}) async {
-  final url = Uri.https(
-    'api.github.com',
-    '/repos/$_repo/releases',
-    <String, String>{'per_page': '100'},
-  );
-  final client = HttpClient();
-  try {
-    final request = await client.getUrl(url);
-    request.headers.set(HttpHeaders.userAgentHeader, 'server_native-setup');
-    final response = await request.close();
-    if (response.statusCode != HttpStatus.ok) {
-      throw Exception(
-        'Failed to resolve release tags (${response.statusCode})',
-      );
-    }
-    final body = await utf8.decodeStream(response);
-    final decoded = jsonDecode(body);
-    if (decoded is! List) {
-      throw Exception('Unexpected releases payload');
-    }
-
-    String? fallbackWithAsset;
-    for (final release in decoded) {
-      if (release is! Map<String, Object?>) {
-        continue;
-      }
-      final tag = release['tag_name'];
-      if (tag is! String || tag.isEmpty) {
-        continue;
-      }
-      final assets = release['assets'];
-      final hasAsset =
-          assets is List &&
-          assets.any(
-            (asset) =>
-                asset is Map<String, Object?> &&
-                asset['name'] == requiredAssetName,
+      case '--platform' || '-p':
+        if (++i >= args.length) throw ArgumentError('Missing platform');
+        platform = args[i];
+      case '--tag' || '-t':
+        if (++i >= args.length || args[i] != release.tag) {
+          throw ArgumentError(
+            'Only the package-pinned tag ${release.tag} is '
+            'supported; other releases do not match its verified manifest.',
           );
-      if (!hasAsset) {
-        continue;
-      }
-      if (tag.startsWith(_prebuiltTagPrefix)) {
-        return tag;
-      }
-      fallbackWithAsset ??= tag;
+        }
+      default:
+        throw ArgumentError('Unknown option: ${args[i]}');
     }
-
-    if (fallbackWithAsset != null) {
-      return fallbackWithAsset;
-    }
-
-    throw Exception(
-      'No release found with asset "$requiredAssetName". '
-      'Create a prebuilt release with tag prefix "$_prebuiltTagPrefix".',
-    );
-  } finally {
-    client.close(force: true);
   }
-}
-
-String _hostPlatform() {
-  final os = Platform.operatingSystem;
-  final arch = _hostArch();
-  return switch (os) {
-    'linux' => 'linux-$arch',
-    'macos' => 'macos-$arch',
-    'windows' => 'windows-$arch',
-    _ => '$os-$arch',
+  platform ??= switch (Abi.current()) {
+    Abi.linuxX64 => 'linux-x64',
+    Abi.linuxArm64 => 'linux-arm64',
+    _ => throw UnsupportedError('Only Linux x64 and ARM64 are supported'),
   };
-}
-
-String _hostArch() {
-  if (Platform.isWindows) {
-    final value = Platform.environment['PROCESSOR_ARCHITECTURE'] ?? '';
-    return value.toUpperCase().contains('ARM') ? 'arm64' : 'x64';
-  }
-  final result = Process.runSync('uname', ['-m']);
-  final machine = (result.stdout as String).trim();
-  return switch (machine) {
-    'x86_64' || 'amd64' => 'x64',
-    'aarch64' || 'arm64' => 'arm64',
-    _ => machine,
+  final architecture = switch (platform) {
+    'linux-x64' => Architecture.x64,
+    'linux-arm64' => Architecture.arm64,
+    _ => throw ArgumentError('Unsupported platform: $platform'),
   };
-}
-
-Directory _findProjectRoot(Directory start) {
-  var directory = start.absolute;
-
-  while (true) {
-    if (File('${directory.path}/pubspec.yaml').existsSync() &&
-        (Directory('${directory.path}/packages').existsSync() ||
-            Directory('${directory.path}/pkgs').existsSync())) {
-      return directory;
-    }
-    final parent = directory.parent;
-    if (parent.path == directory.path) {
-      break;
-    }
-    directory = parent;
-  }
-
-  directory = start.absolute;
-  while (true) {
-    if (File('${directory.path}/pubspec.yaml').existsSync()) {
-      return directory;
-    }
-    final parent = directory.parent;
-    if (parent.path == directory.path) {
-      return start;
-    }
-    directory = parent;
-  }
+  final library =
+      await ArtifactCache(
+        cacheDir: Directory('.dart_tool/server_native/prebuilt'),
+      ).resolve(
+        manifest: server_nativePrebuilts,
+        target: NativeTarget(os: OS.linux, architecture: architecture),
+        libraryStem: 'server_native_zig',
+        payload: const DynamicLibraryPayload(libraryStem: 'server_native_zig'),
+      );
+  if (library == null) throw StateError('No verified prebuilt for $platform');
+  final destination = Directory('.prebuilt/$platform');
+  await destination.create(recursive: true);
+  final installed = await library.copy(
+    '${destination.path}/libserver_native_zig.so',
+  );
+  stdout.writeln('Verified ${release.tag}: ${installed.path}');
 }

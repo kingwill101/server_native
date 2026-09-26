@@ -7,8 +7,8 @@ const server_nativePrebuilts = PrebuiltManifest(
   schemaVersion: 2,
   release: GitHubReleaseSource(
     owner: 'kingwill101',
-    repository: 'routed',
-    tag: 'server-native-prebuilt-v0.1.3+1',
+    repository: 'server_native',
+    tag: 'server-native-prebuilt-v1.0.0-dev',
   ),
   artifacts: {},
 );

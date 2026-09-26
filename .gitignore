@@ -3,3 +3,5 @@ build/
 zig/.zig-cache/
 zig/zig-out/
 zig/zig-pkg/
+.prebuilt/
+pubspec_overrides.yaml

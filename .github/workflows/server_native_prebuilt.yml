@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Binary release tag (e.g. server-native-prebuilt-v0.1.2). If empty, auto-uses package version."
+        description: "Binary release tag (e.g. server-native-prebuilt-v1.0.0-dev). If empty, auto-uses package version."
         required: false
         type: string
   push:
@@ -29,8 +29,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             platform: linux-x64
+            target: x86_64-linux-gnu.2.28
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
+            target: aarch64-linux-gnu.2.28
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
@@ -43,8 +45,8 @@ jobs:
       - name: Build and test Zig asset on its native architecture
         working-directory: zig
         run: |
-          zig build -Doptimize=ReleaseSafe -Dstrip=true
-          zig build test -Doptimize=ReleaseSafe -Dstrip=true
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -Dstrip=true
+          zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -Dstrip=true
 
       - name: Install independent QUIC client
         run: |
@@ -52,6 +54,22 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/aioquic"
           "$RUNNER_TEMP/aioquic/bin/pip" install aioquic==1.3.0
           echo "AIOQUIC_PYTHON=$RUNNER_TEMP/aioquic/bin/python" >> "$GITHUB_ENV"
+
+      - name: Select the exact release library for Dart integration
+        run: |
+          cat > pubspec_overrides.yaml <<EOF
+          hooks:
+            user_defines:
+              server_native:
+                prebuilt_path: $GITHUB_WORKSPACE/zig/zig-out/lib/libserver_native_zig.so
+          EOF
+
+      - name: Disable source compilation during artifact tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-zig"
+          printf '#!/bin/sh\necho "Unexpected Zig source build during prebuilt verification" >&2\nexit 99\n' > "$RUNNER_TEMP/no-zig/zig"
+          chmod +x "$RUNNER_TEMP/no-zig/zig"
+          echo "$RUNNER_TEMP/no-zig" >> "$GITHUB_PATH"
 
       - name: Validate Zig Dart integration on its native architecture
         run: |
@@ -112,6 +130,8 @@ jobs:
             --manifest .dart_tool/zig-release-assets/server_native_zig_prebuilts.g.dart \
             --release-assets-dir .dart_tool/zig-release-assets \
             --built-library-dir .dart_tool/zig-built --strict
+          cp LICENSE THIRD_PARTY_NOTICES .dart_tool/zig-release-assets/
+          git rev-parse HEAD > .dart_tool/zig-release-assets/SOURCE_COMMIT
           cd .dart_tool/zig-release-assets
           sha256sum *.tar.gz > SHA256SUMS-zig.txt
         env:
@@ -142,13 +162,15 @@ jobs:
 
       - name: Determine tag
         id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF:-}" == refs/tags/server-native-prebuilt-v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "$REQUESTED_TAG" ]; then
+            echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
           else
             version="$(awk '/^version:/{print $2; exit}' pubspec.yaml)"
             if [ -z "$version" ]; then
@@ -163,8 +185,14 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/server_native_zig_prebuilts.g.dart
             artifacts/**/SHA256SUMS-zig.txt
+            artifacts/**/LICENSE
+            artifacts/**/THIRD_PARTY_NOTICES
+            artifacts/**/SOURCE_COMMIT
