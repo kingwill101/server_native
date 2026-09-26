@@ -143,10 +143,14 @@ pub fn serveConnection(
 
     var response = bridge_io.Response{};
     defer response.deinit(allocator);
+    var writer = ResponseWriter{ .keep_alive = keep_alive, .head_only = std.mem.eql(u8, head.method, "HEAD"), .http10 = std.mem.eql(u8, head.protocol, "1.0") };
     var response_done = false;
+    const response_wake = try server.enableResponseWake(request_id);
     while (!response_done and !server.stopped.load(.acquire)) {
         const frame = server.takeResponse(request_id) orelse {
-            std.atomic.spinLoopHint();
+            var descriptors = [_]std.posix.pollfd{.{ .fd = response_wake, .events = std.posix.POLL.IN, .revents = 0 }};
+            _ = try std.posix.poll(&descriptors, 100);
+            if (descriptors[0].revents & std.posix.POLL.IN != 0) http1.WakeSignal.drain(response_wake);
             continue;
         };
         defer allocator.free(frame);
@@ -165,8 +169,10 @@ pub fn serveConnection(
             try runDirectTunnel(allocator, server, request_id, connection);
             return false;
         }
+        try writer.consume(allocator, server, connection, frame, &response, response_done);
     }
     if (!response_done or server.stopped.load(.acquire)) return false;
+    if (writer.started) return writer.keep_alive;
     try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
@@ -205,9 +211,11 @@ fn serveBridge(
 
     var response = bridge_io.Response{};
     defer response.deinit(allocator);
+    var writer = ResponseWriter{ .keep_alive = keep_alive, .head_only = std.mem.eql(u8, head.method, "HEAD"), .http10 = std.mem.eql(u8, head.protocol, "1.0") };
     var done = false;
     while (!done) {
         const payload = bridge_io.receiveFrame(allocator, backend.fd) catch |err| {
+            if (writer.started) return err;
             return writeBridgeFailure(allocator, connection, if (response.ready)
                 "bridge call failed before response end"
             else
@@ -231,6 +239,7 @@ fn serveBridge(
             }
         }
         bridge_io.decodeResponseFrame(allocator, payload, &response, &done) catch |err| {
+            if (writer.started) return err;
             return writeBridgeFailure(allocator, connection, "bridge call failed: decode response failed", err);
         };
         if (upgrade and response.status == 101 and (payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start) or payload[1] == @intFromEnum(bridge_protocol.FrameType.response_start_tokenized))) {
@@ -238,16 +247,71 @@ fn serveBridge(
             try runTunnel(allocator, server, backend.fd, connection);
             return false;
         }
+        try writer.consume(allocator, server, connection, payload, &response, done);
     }
     if (upgrade and response.status == 101) {
         try writeUpgradeResponse(allocator, connection, response.status, response.headers.items);
         try runTunnel(allocator, server, backend.fd, connection);
         return false;
     }
+    if (writer.started) return writer.keep_alive;
     try @import("proxy_request.zig").advertiseHttp3(allocator, server, &response);
     try writeHttpResponse(allocator, connection, response.status, response.headers.items, response.body.items, keep_alive);
     return keep_alive;
 }
+
+// Streaming frames must reach the peer before response_end: applications may
+// wait for the client to consume one chunk before producing the next one.
+const ResponseWriter = struct {
+    started: bool = false,
+    chunked: bool = false,
+    keep_alive: bool,
+    head_only: bool,
+    http10: bool,
+    suppress_body: bool = false,
+
+    fn consume(self: *ResponseWriter, allocator: std.mem.Allocator, server: anytype, connection: *http1.Connection, frame: []const u8, response: *bridge_io.Response, done: bool) !void {
+        if (!self.started) {
+            if (frame.len < 2 or (frame[1] != 6 and frame[1] != 14)) return;
+            try @import("proxy_request.zig").advertiseHttp3(allocator, server, response);
+            self.suppress_body = self.head_only or response.status < 200 or response.status == 204 or response.status == 304;
+            var output: std.ArrayList(u8) = .empty;
+            defer output.deinit(allocator);
+            try appendFormat(allocator, &output, "HTTP/1.1 {d} {s}\r\n", .{ response.status, reason(response.status) });
+            var has_length = false;
+            var has_connection = false;
+            for (response.headers.items) |header| {
+                if (asciiEqualIgnoreCase(header.name, "transfer-encoding")) continue;
+                if (asciiEqualIgnoreCase(header.name, "connection")) {
+                    has_connection = true;
+                    if (containsToken(header.value, "close")) self.keep_alive = false;
+                }
+                if (asciiEqualIgnoreCase(header.name, "content-length")) has_length = true;
+                try appendFormat(allocator, &output, "{s}: {s}\r\n", .{ header.name, header.value });
+            }
+            self.chunked = !has_length and !self.suppress_body and !self.http10;
+            if (!has_length and !self.suppress_body and self.http10) self.keep_alive = false;
+            if (self.chunked) try output.appendSlice(allocator, "transfer-encoding: chunked\r\n");
+            if (!has_connection or (!has_length and !self.suppress_body and self.http10)) {
+                try output.appendSlice(allocator, if (self.keep_alive) "connection: keep-alive\r\n" else "connection: close\r\n");
+            }
+            try output.appendSlice(allocator, "\r\n");
+            try http1.sendAllConnection(connection, output.items);
+            self.started = true;
+        }
+        if (!self.suppress_body and response.body.items.len != 0) {
+            if (self.chunked) {
+                var size: [32]u8 = undefined;
+                const prefix = try std.fmt.bufPrint(&size, "{x}\r\n", .{response.body.items.len});
+                try http1.sendAllConnection(connection, prefix);
+            }
+            try http1.sendAllConnection(connection, response.body.items);
+            if (self.chunked) try http1.sendAllConnection(connection, "\r\n");
+        }
+        response.body.clearRetainingCapacity();
+        if (done and self.chunked) try http1.sendAllConnection(connection, "0\r\n\r\n");
+    }
+};
 
 fn writeBridgeFailure(allocator: std.mem.Allocator, connection: *http1.Connection, context: []const u8, err: anyerror) !bool {
     const message = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ context, @errorName(err) });

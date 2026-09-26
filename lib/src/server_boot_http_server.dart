@@ -355,7 +355,9 @@ final class NativeHttpServer extends StreamView<HttpRequest>
       eagerError: false,
     );
     if (!_requestController.isClosed) {
-      await _requestController.close();
+      // Stream completion waits for a listener (or a paused subscription).
+      // Closing the server must not depend on delivery of that done event.
+      unawaited(_requestController.close());
     }
     if (!_stopped.isCompleted) {
       _stopped.complete();

@@ -35,6 +35,69 @@ Future<HttpServer> bind(String mode, {bool secure = false}) async {
 
 void main() {
   for (final mode in ['sdk', 'direct', 'bridge']) {
+    for (final paused in [false, true]) {
+      test(
+        '$mode closes with ${paused ? "paused" : "no"} request listener',
+        () async {
+          final server = await bind(mode);
+          final subscription = paused ? server.listen((_) {}) : null;
+          subscription?.pause();
+          try {
+            await server.close().timeout(const Duration(seconds: 3));
+            await server.close().timeout(const Duration(seconds: 3));
+          } finally {
+            await subscription?.cancel();
+          }
+        },
+      );
+    }
+    for (final explicitLength in [false, true]) {
+      test(
+        '$mode streams response before producer completes (length=$explicitLength)',
+        () async {
+          final server = await bind(mode);
+          addTearDown(() => server.close(force: true));
+          final release = Completer<void>();
+          addTearDown(() {
+            if (!release.isCompleted) release.complete();
+          });
+          server.listen((request) async {
+            request.response.bufferOutput = false;
+            if (explicitLength) request.response.contentLength = 6;
+            request.response.write('one');
+            await request.response.flush();
+            await release.future;
+            request.response.write('two');
+            await request.response.close();
+          });
+          final client = HttpClient();
+          addTearDown(() => client.close(force: true));
+          final request = await client.getUrl(
+            Uri.parse('http://127.0.0.1:${server.port}/'),
+          );
+          final response = await request.close().timeout(
+            const Duration(seconds: 3),
+          );
+          expect(response.headers.chunkedTransferEncoding, !explicitLength);
+          final first = Completer<void>();
+          final bytes = <int>[];
+          final done = Completer<void>();
+          response.listen(
+            (chunk) {
+              bytes.addAll(chunk);
+              if (bytes.length >= 3 && !first.isCompleted) first.complete();
+            },
+            onDone: done.complete,
+            onError: done.completeError,
+          );
+          await first.future.timeout(const Duration(seconds: 3));
+          expect(latin1.decode(bytes), 'one');
+          release.complete();
+          await done.future.timeout(const Duration(seconds: 3));
+          expect(latin1.decode(bytes), 'onetwo');
+        },
+      );
+    }
     for (final body in <String?>[
       null,
       '0\r\n\r\n',
