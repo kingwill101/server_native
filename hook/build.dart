@@ -2,8 +2,10 @@ import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
-
-import 'src/zig_asset.dart';
+import 'package:native_prebuilt/hooks.dart';
+import 'package:native_toolchain_zig/native_toolchain_zig.dart';
+import 'package:server_native/src/generated/server_native_zig_prebuilts.g.dart'
+    as zig_prebuilt;
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
@@ -17,4 +19,35 @@ bool _isSourceCheckout(Uri packageRoot) {
   final directory = Directory.fromUri(packageRoot).absolute;
   return File('${directory.path}/.git').existsSync() ||
       Directory('${directory.path}/.git').existsSync();
+}
+
+const _zigAssetName = 'src/zig_ffi.g.dart';
+const _zigLibraryName = 'server_native_zig';
+
+Future<void> buildZigAsset(
+  BuildInput input,
+  BuildOutputBuilder output, {
+  required bool sourceCheckout,
+}) async {
+  await PrebuiltCodeAssetBuilder(
+    assetName: _zigAssetName,
+    libraryStem: _zigLibraryName,
+    manifest: zig_prebuilt.server_nativePrebuilts,
+    linkModeResolver: (_) => DynamicLoadingBundled(),
+    resolvers: sourceCheckout
+        ? const <PrebuiltResolver>[UserDefinePrebuiltResolver()]
+        : null,
+    sourceFallback: SourceFallback(
+      sources: const [
+        LocalSource(paths: <String>['.']),
+      ],
+      builder: HookBuilderSourceBuilder.factory(
+        (_, _) => const ZigBuilder(
+          assetName: _zigAssetName,
+          zigDir: 'zig',
+          libraryName: _zigLibraryName,
+        ),
+      ),
+    ),
+  ).run(input: input, output: output, logger: null);
 }
