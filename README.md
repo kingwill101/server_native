@@ -58,8 +58,19 @@ required. This `1.0.0-dev` release is a prerelease for compatibility testing.
 
 ```yaml
 dependencies:
-  server_native: ^0.1.3+1
+  server_native: ^1.0.0-dev
 ```
+
+For an AOT deployment, build a CLI bundle so Dart includes the native library:
+
+```sh
+dart build cli --target bin/server.dart
+./build/cli/linux_x64/bundle/bin/server
+```
+
+Replace the entry point and architecture directory as appropriate. Deploy the
+entire `bundle` directory, including `lib/`. Plain `dart compile exe` does not
+bundle code assets. `dart run` resolves them automatically during development.
 
 ## Quick Start (`HttpServer` Style)
 
