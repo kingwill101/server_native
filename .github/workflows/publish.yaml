@@ -5,8 +5,8 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
-    # Includes prereleases such as v1.0.0-dev; excludes prebuilt release tags.
-    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+    # Includes prereleases such as server_native-v1.0.0-dev.1; excludes prebuilt release tags.
+    tags: ['server_native-v[0-9]+.[0-9]+.[0-9]+*']
 
 permissions:
   contents: read
@@ -16,6 +16,7 @@ jobs:
     uses: dart-lang/ecosystem/.github/workflows/publish.yaml@main
     with:
       sdk: stable
+      tag-prefix: server_native-v
       write-comments: false
     permissions:
       contents: read

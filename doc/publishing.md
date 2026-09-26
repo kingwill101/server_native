@@ -11,7 +11,7 @@ In the [package admin settings](https://pub.dev/packages/server_native/admin),
 enable automated publishing from GitHub Actions:
 
 - Repository: `kingwill101/server_native`
-- Tag pattern: `v{{version}}`
+- Tag pattern: `server_native-v{{version}}`
 - No GitHub environment is configured by this workflow.
 
 See [Dart automated publishing](https://dart.dev/tools/pub/automated-publishing)
@@ -32,14 +32,14 @@ this setup before the first tag-triggered publish.
 5. Tag the merged release commit and push the tag. For this prerelease:
 
    ```sh
-   git tag v1.0.0-dev.1 <merged-release-commit>
-   git push origin v1.0.0-dev.1
+   git tag server_native-v1.0.0-dev.1 <merged-release-commit>
+   git push origin server_native-v1.0.0-dev.1
    ```
 
 **Pushing the package tag publishes to pub.dev.** Firehose checks that the tag,
 pubspec, and changelog versions agree before running `dart pub publish --force`.
 Its current implementation supports explicit prerelease tags such as
-`v1.0.0-dev.1`. The prebuilt tag does not trigger package publication.
+`server_native-v1.0.0-dev.1`. The prebuilt tag does not trigger package publication.
 
 After publication, keep the pinned binary assets immutable. Runtime or binary
 changes require a new package version, binary release, and checksum manifest.

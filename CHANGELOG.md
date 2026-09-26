@@ -4,6 +4,8 @@ All notable changes to `server_native` will be documented in this file.
 
 ## 1.0.0-dev.1
 
+- Align Firehose package tags with the pub.dev `server_native-v{{version}}` policy.
+
 - Correct README protocol defaults, Dart API-DL transport descriptions, TLS and
   platform limits, and compatibility scope; remove obsolete Rust benchmark tables.
 - Reuse the checksum-pinned `1.0.0-dev` native binaries; no runtime changes.
