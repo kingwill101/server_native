@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       framework:
-        description: "Framework(s): all,shelf,relic,serinus"
+        description: "Framework(s): all,shelf,relic"
         required: false
         default: "all"
       mode:
@@ -42,12 +42,6 @@ jobs:
             mode: io
             allow_failure: true
           - framework: relic
-            mode: native
-            allow_failure: true
-          - framework: serinus
-            mode: io
-            allow_failure: true
-          - framework: serinus
             mode: native
             allow_failure: true
     continue-on-error: ${{ matrix.allow_failure }}
