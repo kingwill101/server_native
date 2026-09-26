@@ -9,6 +9,7 @@ const c = @cImport({
     @cInclude("sys/types.h");
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
+    @cInclude("time.h");
     @cInclude("openssl/ssl.h");
 });
 
@@ -109,7 +110,27 @@ pub const Connection = struct {
         const ssl = c.SSL_new(context.ctx) orelse return error.TlsConnectionFailed;
         errdefer c.SSL_free(ssl);
         if (c.SSL_set_fd(ssl, self.fd) != 1) return error.TlsConnectionFailed;
-        if (c.SSL_accept(ssl) != 1) return error.TlsHandshakeFailed;
+        const flags = std.posix.system.fcntl(self.fd, std.posix.F.GETFL, @as(c_int, 0));
+        if (flags < 0 or std.posix.system.fcntl(self.fd, std.posix.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) < 0) return error.TlsHandshakeFailed;
+        defer _ = std.posix.system.fcntl(self.fd, std.posix.F.SETFL, flags);
+        var now: c.struct_timespec = undefined;
+        if (c.clock_gettime(c.CLOCK_MONOTONIC, &now) != 0) return error.TlsHandshakeFailed;
+        const deadline = now.tv_sec * 1000 + @divTrunc(now.tv_nsec, 1_000_000) + 5000;
+        while (true) {
+            const result = c.SSL_accept(ssl);
+            if (result == 1) break;
+            const ssl_error = c.SSL_get_error(ssl, result);
+            const events: i16 = switch (ssl_error) {
+                c.SSL_ERROR_WANT_READ => std.posix.POLL.IN,
+                c.SSL_ERROR_WANT_WRITE => std.posix.POLL.OUT,
+                else => return error.TlsHandshakeFailed,
+            };
+            if (c.clock_gettime(c.CLOCK_MONOTONIC, &now) != 0) return error.TlsHandshakeFailed;
+            const remaining = deadline - (now.tv_sec * 1000 + @divTrunc(now.tv_nsec, 1_000_000));
+            if (remaining <= 0) return error.TlsHandshakeTimeout;
+            var pollfds = [_]std.posix.pollfd{.{ .fd = self.fd, .events = events, .revents = 0 }};
+            if (try std.posix.poll(&pollfds, @intCast(remaining)) == 0) return error.TlsHandshakeTimeout;
+        }
         self.ssl = ssl;
     }
 

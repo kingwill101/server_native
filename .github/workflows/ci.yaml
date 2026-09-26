@@ -74,4 +74,4 @@ jobs:
           dart test test/serve_ffi_http_test.dart
           dart test test/native_proxy_failure_test.dart test/native_transport_contract_test.dart
           dart test test/zig_dart_api_test.dart
-          dart test test/sdk_http_server_compat_test.dart test/sdk_http_server_edge_cases_test.dart test/sdk_http_server_fixtures_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart
+          dart test test/sdk_http_server_compat_test.dart test/http1_framing_regression_test.dart test/sdk_http_server_edge_cases_test.dart test/sdk_http_server_fixtures_test.dart test/serve_ffi_direct_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart

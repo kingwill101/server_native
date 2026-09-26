@@ -55,7 +55,7 @@ jobs:
 
       - name: Validate Zig Dart integration on its native architecture
         run: |
-          dart test test/bridge_concurrency_test.dart test/sdk_http_server_compat_test.dart test/serve_ffi_http_test.dart test/serve_ffi_direct_test.dart test/zig_dart_api_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart test/http3_shared_test.dart test/http3_backpressure_test.dart test/http3_shutdown_test.dart
+          dart test test/bridge_concurrency_test.dart test/sdk_http_server_compat_test.dart test/http1_framing_regression_test.dart test/serve_ffi_http_test.dart test/serve_ffi_direct_test.dart test/zig_dart_api_test.dart test/http2_concurrency_test.dart test/http2_streaming_test.dart test/http3_shared_test.dart test/http3_backpressure_test.dart test/http3_shutdown_test.dart
           dart test test/http3_runtime_test.dart -n 'aioquic|streaming|loss|address-validation|rebinding|drain-replay'
 
       - name: Stage verified build

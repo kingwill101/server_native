@@ -293,12 +293,6 @@ pub const ProxyServer = struct {
                 connection.close();
                 break;
             }
-            if (self.tls) |*context| {
-                connection.acceptTls(context) catch {
-                    self.closeConnection(&connection);
-                    continue;
-                };
-            }
             _ = self.active_connections.fetchAdd(1, .acq_rel);
             const thread = std.Thread.spawn(.{}, connectionLoop, .{ self, connection }) catch {
                 self.closeConnection(&connection);
@@ -316,12 +310,17 @@ pub const ProxyServer = struct {
             _ = self.active_connections.fetchSub(1, .acq_rel);
         }
 
+        if (self.tls) |*context| {
+            owned_connection.acceptTls(context) catch return;
+        }
+        var input: std.ArrayList(u8) = .empty;
+        defer input.deinit(self.allocator);
         if (self.http2_enabled and (owned_connection.isH2() or owned_connection.hasHttp2Preface())) {
             proxy_http2.serve(self.allocator, self, &owned_connection) catch {};
             return;
         }
         while (!self.stopped.load(.acquire)) {
-            const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection) catch |err| {
+            const keep_alive = proxy_http1.serveConnection(self.allocator, self, &owned_connection, &input) catch |err| {
                 if (self.stopped.load(.acquire) or err == error.InvalidRequest) break;
                 if (err == error.InvalidRequestTarget or err == error.InvalidTransferEncoding) {
                     http1.sendAllConnection(&owned_connection, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n") catch {};

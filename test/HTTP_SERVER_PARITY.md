@@ -46,6 +46,22 @@ allowing the local writer to appear drained while the remote peer had stalled.
   failing slow-reader drain deadline. The full framework suite was not rerun.
 - Analysis still reports only the existing 26 informational lints.
 
+## HTTP/1 framing and TLS review fixes
+
+`http1_framing_regression_test.dart` checks pipelined requests, empty chunked
+bodies, chunk data resembling a terminator, stalled TLS-client isolation,
+shutdown with a pending handshake, and handshake expiry. The shared cases run
+against dart:io, Zig direct, and Zig bridge. Native scanner tests exercise every
+split point, pipelined trailing bytes, malformed delimiters and size overflow.
+
+TLS handshakes run in connection workers with a five-second monotonic deadline.
+HTTP/1 retains unread bytes across requests and parses chunk sizes to locate
+body completion.
+
+Validation: 190 Dart regression tests passed, including all 13 new cases;
+`zig build test` and `zig build test -Doptimize=ReleaseSafe` passed. Analysis
+reports the existing 26 informational lints, with no errors or warnings.
+
 ## Evidence before the Zig-only cutover
 
 Dart 3.13.4, Linux x64:

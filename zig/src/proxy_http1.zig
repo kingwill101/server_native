@@ -10,13 +10,12 @@ pub fn serveConnection(
     allocator: std.mem.Allocator,
     server: anytype,
     connection: *http1.Connection,
+    input: *std.ArrayList(u8),
 ) !bool {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const request_allocator = arena.allocator();
 
-    var input: std.ArrayList(u8) = .empty;
-    defer input.deinit(allocator);
     var scratch: [8192]u8 = undefined;
     var header_end: ?usize = null;
     var content_length: usize = 0;
@@ -24,23 +23,34 @@ pub fn serveConnection(
 
     while (header_end == null) {
         if (server.stopped.load(.acquire)) return false;
-        const count = (try http1.receiveTimeoutConnection(connection, &scratch, 50)) orelse continue;
-        if (count == 0) return false;
-        try input.appendSlice(allocator, scratch[0..count]);
-        if (input.items.len > max_header_bytes) return error.HeadersTooLarge;
         if (std.mem.indexOf(u8, input.items, "\r\n\r\n")) |index| {
             header_end = index + 4;
             const header_bytes = input.items[0..index];
             content_length = parseContentLength(header_bytes) catch return error.InvalidContentLength;
             chunked_body = try parseTransferEncoding(header_bytes);
             if (content_length > max_body_bytes) return error.BodyTooLarge;
+            if (header_end.? > max_header_bytes) return error.HeadersTooLarge;
+            break;
         }
+        if (input.items.len > max_header_bytes) return error.HeadersTooLarge;
+        const count = (try http1.receiveTimeoutConnection(connection, &scratch, 50)) orelse continue;
+        if (count == 0) return false;
+        try input.appendSlice(allocator, scratch[0..count]);
     }
 
+    var scanner: ChunkScanner = .{};
+    var body_end: usize = undefined;
     var idle_body_reads: u16 = 0;
-    while ((chunked_body and std.mem.indexOf(u8, input.items[header_end.?..], "\r\n0\r\n\r\n") == null) or
-        (!chunked_body and input.items.len < header_end.? + content_length))
-    {
+    while (true) {
+        if (chunked_body) {
+            if (try scanner.scan(input.items[header_end.?..])) |end| {
+                body_end = header_end.? + end;
+                break;
+            }
+        } else if (input.items.len >= header_end.? + content_length) {
+            body_end = header_end.? + content_length;
+            break;
+        }
         const count = (try http1.receiveTimeoutConnection(connection, &scratch, 50)) orelse {
             idle_body_reads += 1;
             if (idle_body_reads >= 20) return error.RequestBodyTimeout;
@@ -49,8 +59,13 @@ pub fn serveConnection(
         idle_body_reads = 0;
         if (count == 0) return error.ConnectionClosed;
         try input.appendSlice(allocator, scratch[0..count]);
-        if (!chunked_body and input.items.len > header_end.? + content_length) break;
-        if (input.items.len > header_end.? + max_body_bytes + 128) return error.BodyTooLarge;
+        if (input.items.len > header_end.? + max_body_bytes + max_header_bytes) return error.BodyTooLarge;
+    }
+    // Keep bytes belonging to the next request until its handler runs.
+    defer {
+        const remaining = input.items.len - body_end;
+        std.mem.copyForwards(u8, input.items[0..remaining], input.items[body_end..]);
+        input.items.len = remaining;
     }
 
     var lines = std.mem.splitSequence(u8, input.items[0 .. header_end.? - 4], "\r\n");
@@ -110,7 +125,7 @@ pub fn serveConnection(
     if (!server.bridgeEnabled()) try server.queue.push(@bitCast(request_id), start);
 
     const body = if (chunked_body)
-        try decodeChunkedBody(request_allocator, input.items[header_end.?..])
+        try decodeChunkedBody(request_allocator, input.items[header_end.?..body_end])
     else
         input.items[header_end.? .. header_end.? + content_length];
     if (server.bridgeEnabled()) {
@@ -367,6 +382,31 @@ fn parseTransferEncoding(headers: []const u8) !bool {
     return present;
 }
 
+const ChunkScanner = struct {
+    offset: usize = 0,
+    decoded_bytes: usize = 0,
+
+    fn scan(self: *ChunkScanner, encoded: []const u8) !?usize {
+        while (true) {
+            const line_end = std.mem.indexOfPos(u8, encoded, self.offset, "\r\n") orelse {
+                if (encoded.len - self.offset > max_header_bytes) return error.InvalidChunkedBody;
+                return null;
+            };
+            const line = encoded[self.offset..line_end];
+            const size_text = if (std.mem.indexOfScalar(u8, line, ';')) |end| line[0..end] else line;
+            const size = std.fmt.parseUnsigned(usize, trim(size_text), 16) catch return error.InvalidChunkedBody;
+            const start = line_end + 2;
+            if (size > max_body_bytes - self.decoded_bytes) return error.BodyTooLarge;
+            if (encoded.len - start < size + 2) return null;
+            const end = start + size;
+            if (!std.mem.eql(u8, encoded[end..][0..2], "\r\n")) return error.InvalidChunkedBody;
+            if (size == 0) return end + 2;
+            self.offset = end + 2;
+            self.decoded_bytes += size;
+        }
+    }
+};
+
 fn decodeChunkedBody(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
@@ -614,7 +654,9 @@ fn rejectRequest(wire: []const u8, expected: anyerror) !void {
     defer _ = c.close(fds[1]);
     try http1.sendAll(fds[1], wire);
     http1.shutdownWrite(fds[1]);
-    try std.testing.expectError(expected, serveConnection(a, &server, &connection));
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(a);
+    try std.testing.expectError(expected, serveConnection(a, &server, &connection, &input));
     try std.testing.expectEqual(@as(usize, 0), queue.count());
     try std.testing.expectEqual(@as(u32, 0), server.pending.count());
 }
@@ -662,4 +704,22 @@ test "HTTP1 framing rejects unknown empty and non-final transfer codings across 
     }
     try std.testing.expect(try parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: , CHUNKED, \r\n"));
     try std.testing.expect(!try parseTransferEncoding("GET / HTTP/1.1\r\nHost: test\r\n"));
+}
+
+test "chunk scanner handles every split and leaves pipelined bytes untouched" {
+    const wire = "5\r\n\r\n0\r\n\r\n0;done=yes\r\n\r\n";
+    for (0..wire.len) |split| {
+        var scanner: ChunkScanner = .{};
+        try std.testing.expectEqual(@as(?usize, null), try scanner.scan(wire[0..split]));
+        try std.testing.expectEqual(@as(?usize, wire.len), try scanner.scan(wire ++ "GET /next HTTP/1.1\r\n\r\n"));
+    }
+    var empty: ChunkScanner = .{};
+    try std.testing.expectEqual(@as(?usize, 5), try empty.scan("0\r\n\r\nGET /next"));
+}
+
+test "chunk scanner rejects missing delimiters and decoded body overflow" {
+    var malformed: ChunkScanner = .{};
+    try std.testing.expectError(error.InvalidChunkedBody, malformed.scan("1\r\nxXX"));
+    var oversized: ChunkScanner = .{};
+    try std.testing.expectError(error.BodyTooLarge, oversized.scan("2000001\r\n"));
 }
